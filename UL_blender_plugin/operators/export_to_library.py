@@ -591,9 +591,19 @@ class UAL_OT_export_to_library(Operator):
             # USD export temporarily disabled - Blender-centric workflow
             usd_path = None
 
-            # Generate thumbnail (to library only - it's the latest)
-            thumbnail_path = library_folder / "thumbnail.png"
-            self._generate_thumbnail(context, str(thumbnail_path))
+            # Generate thumbnail (versioned to match blend file)
+            thumbnail_filename = f"thumbnail.{version_label}.png"
+            thumbnail_versioned = library_folder / thumbnail_filename
+            self._generate_thumbnail(context, str(thumbnail_versioned))
+            
+            # Also create thumbnail.current.png (stable path for cache watching)
+            # DB stores thumbnail.current.png for latest version
+            thumbnail_current = library_folder / "thumbnail.current.png"
+            if thumbnail_versioned.exists():
+                shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            
+            # For DB and archive, use appropriate paths
+            thumbnail_path = thumbnail_current  # Latest uses .current for cache watching
 
             # Collect metadata
             metadata = self._collect_metadata(context)
@@ -621,10 +631,11 @@ class UAL_OT_export_to_library(Operator):
 
             # Copy all files to archive for this version as well
             # Archive contains complete history, library is just the latest
+            # Archive uses versioned thumbnail, not .current
             archive_folder = library.get_archive_folder_path(
                 asset_id, self.asset_name, variant_name, version_label, self.asset_type
             )
-            for src_file in [library_blend_path, thumbnail_path, json_path]:
+            for src_file in [library_blend_path, thumbnail_versioned, json_path]:
                 if src_file.exists():
                     shutil.copy2(str(src_file), str(archive_folder / src_file.name))
 
@@ -710,17 +721,24 @@ class UAL_OT_export_to_library(Operator):
                 # Update previous version: mark as not latest, update paths to archive
                 # Use versioned filename for archived version
                 prev_blend_filename = f"{self.asset_name}.{previous_version_label}.blend"
+                prev_thumbnail_filename = f"thumbnail.{previous_version_label}.png"
                 library.update_asset(self.source_uuid, {
                     'is_latest': 0,
                     'is_cold': 1,
                     'is_immutable': 1,
                     'cold_storage_path': str(prev_archive_folder),
                     'blend_backup_path': str(prev_archive_folder / prev_blend_filename),
-                    'thumbnail_path': str(prev_archive_folder / "thumbnail.png"),
+                    'thumbnail_path': str(prev_archive_folder / prev_thumbnail_filename),
                 })
 
             # Add the new asset/version
             library.add_asset(asset_data)
+
+            # Copy folder memberships from source to new asset
+            # - New version: inherits folders from previous version (same variant)
+            # - New variant: inherits folders from source variant (same family)
+            if (is_new_version or is_new_variant) and self.source_uuid:
+                library.copy_folders_to_asset(self.source_uuid, asset_uuid)
 
             # Note: _update_object_metadata was already called before save to ensure the .blend
             # file has correct metadata. This second call ensures the current scene objects
@@ -1303,13 +1321,20 @@ class UAL_OT_export_material(Operator):
             # USD export temporarily disabled - Blender-centric workflow
             usd_path = None
 
-            # Generate sphere preview thumbnail
-            thumbnail_path = library_folder / "thumbnail.png"
-            self._generate_material_thumbnail(context, material, str(thumbnail_path))
+            # Generate sphere preview thumbnail (versioned)
+            thumbnail_filename = f"thumbnail.{version_label}.png"
+            thumbnail_versioned = library_folder / thumbnail_filename
+            self._generate_material_thumbnail(context, material, str(thumbnail_versioned))
 
-            # Copy thumbnail to archive
-            if thumbnail_path.exists():
-                shutil.copy2(str(thumbnail_path), str(archive_folder / "thumbnail.png"))
+            # Create thumbnail.current.png (stable path for cache watching)
+            thumbnail_current = library_folder / "thumbnail.current.png"
+            if thumbnail_versioned.exists():
+                shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            thumbnail_path = thumbnail_current  # DB stores .current for latest
+
+            # Copy versioned thumbnail to archive
+            if thumbnail_versioned.exists():
+                shutil.copy2(str(thumbnail_versioned), str(archive_folder / thumbnail_filename))
 
             # Collect material-specific metadata
             mat_metadata = collect_material_metadata([material])
@@ -1352,13 +1377,14 @@ class UAL_OT_export_material(Operator):
                 )
                 # Use versioned filename for archived version
                 prev_blend_filename = f"{asset_name}.{previous_version_label}.blend"
+                prev_thumbnail_filename = f"thumbnail.{previous_version_label}.png"
                 library.update_asset(self.source_uuid, {
                     'is_latest': 0,
                     'is_cold': 1,
                     'is_immutable': 1,
                     'cold_storage_path': str(prev_archive_folder),
                     'blend_backup_path': str(prev_archive_folder / prev_blend_filename),
-                    'thumbnail_path': str(prev_archive_folder / "thumbnail.png"),
+                    'thumbnail_path': str(prev_archive_folder / prev_thumbnail_filename),
                 })
 
             # Add to library database
@@ -1398,6 +1424,10 @@ class UAL_OT_export_material(Operator):
             }
 
             library.add_asset(asset_data)
+
+            # Copy folder memberships from source version to new version
+            if is_new_version and self.source_uuid:
+                library.copy_folders_to_asset(self.source_uuid, asset_uuid)
 
             # Store metadata back on material for future versioning
             from ..utils.metadata_handler import store_material_metadata

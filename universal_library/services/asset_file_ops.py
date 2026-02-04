@@ -3,8 +3,8 @@ AssetFileOps - Asset file operations (rename, move).
 
 Handles:
 - Renaming assets (filesystem + database)
-- Moving assets between folders
-- Atomic operations with rollback support
+- Moving assets between folders (virtual - database only)
+- Atomic operations with rollback support for renames
 """
 
 import logging
@@ -12,7 +12,6 @@ import os
 import re
 import json
 import time
-import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Optional, Callable, Dict, Any
@@ -26,9 +25,12 @@ class AssetFileOps:
     """
     Handles filesystem operations for assets.
 
-    Uses two-phase commit pattern:
+    Rename uses two-phase commit pattern:
     1. Filesystem changes (with rollback)
     2. Database updates (transactional)
+
+    Move is virtual (database only) - folders are organizational
+    containers that don't affect physical file locations.
     """
 
     def __init__(
@@ -158,9 +160,10 @@ class AssetFileOps:
 
             # Phase 4: Update database
             variant_name = asset.get('variant_name', 'Base')
+            version_label = asset.get('version_label', 'v001')
             new_variant_folder = new_asset_folder / variant_name
-            new_blend_path = new_variant_folder / f"{safe_new_name}.blend"
-            new_thumbnail_path = new_variant_folder / "thumbnail.png"
+            new_blend_path = new_variant_folder / f"{safe_new_name}.{version_label}.blend"
+            new_thumbnail_path = new_variant_folder / f"thumbnail.{version_label}.png"
 
             updates = {
                 'name': safe_new_name,
@@ -204,18 +207,15 @@ class AssetFileOps:
         target_folder_id: Optional[int]
     ) -> Tuple[bool, str]:
         """
-        Move asset to a different folder with physical file relocation.
+        Move asset to a different folder (virtual - database only).
 
-        Uses two-phase commit pattern:
-        1. Copy files to new location (can fail safely)
-        2. Update database (transactional)
-        3. Delete old files (cleanup)
-
-        Hybrid structure: library/{type}/{folder_path}/{asset_name}/{variant}/
+        Folders are virtual organizational containers. This operation only
+        updates the asset's folder membership in the database. Physical files
+        remain in place, ensuring linked/instanced assets never break.
 
         Args:
             asset_uuid: Asset UUID to move
-            target_folder_id: Target folder ID (None = root level)
+            target_folder_id: Target folder ID (None = remove from all folders)
 
         Returns:
             Tuple of (success, message)
@@ -224,103 +224,25 @@ class AssetFileOps:
         if not asset:
             return False, f"Asset not found: {asset_uuid}"
 
-        asset_name = asset.get('name')
-        asset_type = asset.get('asset_type', 'mesh')
-        blend_path = asset.get('blend_backup_path')
-
-        if not blend_path:
-            return False, "Asset has no blend file path"
-
-        blend_file = Path(blend_path)
-        if not blend_file.exists():
-            return False, f"Blend file not found: {blend_path}"
-
-        # Calculate old and new folder paths
-        variant_folder = blend_file.parent
-        old_asset_folder = variant_folder.parent
-
-        # Get target folder path
-        if target_folder_id:
-            target_path = self._get_folder_path(target_folder_id)
-            if target_path is None:
-                return False, f"Target folder not found: {target_folder_id}"
-        else:
-            target_path = ""  # Root level (no folder)
-
-        # Calculate new asset folder location
-        library_folder = Config.get_library_folder()
-        type_folder = library_folder / Config.get_type_folder(asset_type)
-
-        if target_path:
-            new_asset_folder = type_folder / target_path / asset_name
-        else:
-            new_asset_folder = type_folder / asset_name
-
-        # Check if already in target location
-        if old_asset_folder == new_asset_folder:
-            return True, "Asset already in target folder"
-
-        # Check for conflicts
-        if new_asset_folder.exists():
-            return False, f"Target location already exists: {new_asset_folder}"
-
-        new_folder_created = False
         try:
-            # Phase 1: Copy files to new location (safer than move)
-            new_asset_folder.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(str(old_asset_folder), str(new_asset_folder))
-            new_folder_created = True
-
-            # Phase 2: Update database paths
-            variant_name = asset.get('variant_name', 'Base')
-            new_variant_folder = new_asset_folder / variant_name
-            new_blend = new_variant_folder / blend_file.name
-            new_thumb = new_variant_folder / "thumbnail.png"
-
-            updates = {
-                'blend_backup_path': str(new_blend) if new_blend.exists() else None,
-                'thumbnail_path': str(new_thumb) if new_thumb.exists() else None,
-                'modified_date': datetime.now().isoformat(),
-            }
-
-            # Update USD path if exists
-            usd_path = asset.get('usd_file_path')
-            if usd_path:
-                old_usd = Path(usd_path)
-                new_usd = new_variant_folder / old_usd.name
-                if new_usd.exists():
-                    updates['usd_file_path'] = str(new_usd)
-
-            self._update_asset(asset_uuid, updates)
-
-            # Update folder membership
+            # Virtual move - update folder membership only
             if target_folder_id:
+                # Move to target folder
                 self._set_asset_folders(asset_uuid, [target_folder_id])
             else:
-                # Clear folder memberships (asset at root level)
+                # Remove from all folders (root level)
                 current_folders = self._get_asset_folders(asset_uuid)
                 for folder in current_folders:
                     self._remove_asset_from_folder(asset_uuid, folder.get('id'))
 
-            # Also update all other versions of this asset
-            version_group_id = asset.get('version_group_id')
-            if version_group_id:
-                self._update_moved_version_paths(
-                    version_group_id, asset_uuid, new_asset_folder
-                )
+            # Update modified date
+            self._update_asset(asset_uuid, {
+                'modified_date': datetime.now().isoformat(),
+            })
 
-            # Phase 3: Cleanup - delete old location
-            shutil.rmtree(str(old_asset_folder))
-
-            return True, f"Successfully moved to folder"
+            return True, "Successfully moved to folder"
 
         except Exception as e:
-            # Rollback: Remove partial copy
-            if new_folder_created and new_asset_folder.exists():
-                try:
-                    shutil.rmtree(str(new_asset_folder), ignore_errors=True)
-                except Exception as cleanup_err:
-                    logger.warning(f"Cleanup failed for {new_asset_folder}: {cleanup_err}")
             return False, f"Move failed: {e}"
 
     def _rename_with_retry(
@@ -370,9 +292,10 @@ class AssetFileOps:
             v_uuid = version.get('uuid')
             if v_uuid and v_uuid != exclude_uuid:
                 v_variant = version.get('variant_name', 'Base')
+                v_version_label = version.get('version_label', 'v001')
                 v_variant_folder = new_asset_folder / v_variant
-                v_blend = v_variant_folder / f"{new_name}.blend"
-                v_thumb = v_variant_folder / "thumbnail.png"
+                v_blend = v_variant_folder / f"{new_name}.{v_version_label}.blend"
+                v_thumb = v_variant_folder / f"thumbnail.{v_version_label}.png"
                 v_updates = {
                     'name': new_name,
                     'modified_date': datetime.now().isoformat(),
@@ -382,33 +305,6 @@ class AssetFileOps:
                 if v_thumb.exists():
                     v_updates['thumbnail_path'] = str(v_thumb)
                 self._update_asset(v_uuid, v_updates)
-
-    def _update_moved_version_paths(
-        self,
-        version_group_id: str,
-        exclude_uuid: str,
-        new_asset_folder: Path
-    ):
-        """Update paths for all versions after move."""
-        all_versions = self._get_versions(version_group_id)
-        for version in all_versions:
-            v_uuid = version.get('uuid')
-            if v_uuid and v_uuid != exclude_uuid:
-                v_variant = version.get('variant_name', 'Base')
-                v_variant_folder = new_asset_folder / v_variant
-                v_blend_path = version.get('blend_backup_path')
-                if v_blend_path:
-                    v_blend_name = Path(v_blend_path).name
-                    v_new_blend = v_variant_folder / v_blend_name
-                    v_new_thumb = v_variant_folder / "thumbnail.png"
-                    v_updates = {
-                        'modified_date': datetime.now().isoformat(),
-                    }
-                    if v_new_blend.exists():
-                        v_updates['blend_backup_path'] = str(v_new_blend)
-                    if v_new_thumb.exists():
-                        v_updates['thumbnail_path'] = str(v_new_thumb)
-                    self._update_asset(v_uuid, v_updates)
 
 
 __all__ = ['AssetFileOps']

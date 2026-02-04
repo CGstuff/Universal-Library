@@ -8,12 +8,13 @@ These are file copies placed in the library folder at stable paths:
 
 Structure:
     library/meshes/Sword/Base/
-      Sword.v002.blend      <- Latest version (versioned filename)
-      Sword.current.blend   <- Copy of latest (stable link target, NO version)
-      Sword.proxy.blend     <- Copy of designated proxy (stable, NO version)
-      Sword.render.blend    <- Copy of designated render (stable, NO version)
+      Sword.v002.blend       <- Latest version (versioned filename)
+      Sword.current.blend    <- Copy of latest (stable link target, NO version)
+      Sword.proxy.blend      <- Copy of designated proxy (stable, NO version)
+      Sword.render.blend     <- Copy of designated render (stable, NO version)
       Sword.v002.json
-      thumbnail.png
+      thumbnail.v002.png     <- Versioned thumbnail (for archive/history)
+      thumbnail.current.png  <- Copy of latest thumbnail (stable path for cache watching)
 
 The representation files (.current, .proxy, .render) use BASE names without
 version numbers because they are stable link targets. Shot Library links to

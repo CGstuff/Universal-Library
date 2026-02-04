@@ -4,18 +4,16 @@ FolderRepository - Folder CRUD operations
 Pattern: Repository pattern for folder data access
 Extracted from DatabaseService for separation of concerns.
 
-Physical Folder Management:
-- Creates physical folders alongside database entries
-- Uses hybrid structure: library/{type}/{folder_path}/{asset}/
-- Supports rename with physical folder updates
+Virtual Folder System:
+- Folders exist only in the database as organizational containers
+- Assets are organized by folder membership (asset_folders table)
+- Moving assets between folders = database update only, no file operations
+- This ensures linked/instanced assets never have broken paths
 """
 
 import sqlite3
-import os
-import shutil
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Optional, Any, Tuple
+from typing import List, Dict, Optional, Any
 
 from .base_repository import BaseRepository
 from ..config import Config
@@ -58,19 +56,19 @@ class FolderRepository(BaseRepository):
             raise RuntimeError("Cannot find or create root folder")
 
     def create(self, name: str, parent_id: Optional[int] = None,
-               description: str = "", create_physical: bool = True) -> Optional[int]:
+               description: str = "", create_physical: bool = False) -> Optional[int]:
         """
-        Create new folder with optional physical folder creation.
+        Create new folder (virtual - database only).
 
-        Creates both a database entry and physical folders on disk.
-        Physical folders are created per asset type:
-        library/{type}/{folder_path}/
+        Folders are virtual organizational containers. Assets are organized
+        by folder membership in the database, not by physical file location.
+        This ensures that moving assets between folders never breaks links.
 
         Args:
             name: Folder name
             parent_id: Parent folder ID (None for root-level)
             description: Optional description
-            create_physical: Whether to create physical folders on disk
+            create_physical: Deprecated, ignored (kept for API compatibility)
 
         Returns:
             New folder ID or None on error
@@ -79,10 +77,10 @@ class FolderRepository(BaseRepository):
             with self._transaction() as conn:
                 cursor = conn.cursor()
 
-                # Sanitize folder name for filesystem
+                # Sanitize folder name (for display/path consistency)
                 safe_name = Config.sanitize_filename(name)
 
-                # Build path based on parent
+                # Build virtual path based on parent (for hierarchy display)
                 if parent_id is not None:
                     cursor.execute('SELECT path FROM folders WHERE id = ?', (parent_id,))
                     result = cursor.fetchone()
@@ -101,31 +99,12 @@ class FolderRepository(BaseRepository):
 
                 folder_id = cursor.lastrowid
 
-                # Create physical folders for each asset type
-                if create_physical and folder_id:
-                    self._create_physical_folders(full_path)
+                # Virtual folders - no physical folder creation
+                # Assets are organized by database membership, not file location
 
                 return folder_id
         except sqlite3.IntegrityError:
             return None
-
-    def _create_physical_folders(self, folder_path: str):
-        """
-        Create physical folders for each asset type.
-
-        Creates folders at: library/{type}/{folder_path}/
-
-        Args:
-            folder_path: The folder path relative to type folder
-        """
-        try:
-            library_folder = Config.get_library_folder()
-            for asset_type in Config.ASSET_TYPES:
-                type_folder = library_folder / asset_type
-                physical_path = type_folder / folder_path
-                physical_path.mkdir(parents=True, exist_ok=True)
-        except Exception as e:
-            pass
 
     def get_by_id(self, folder_id: int) -> Optional[Dict[str, Any]]:
         """Get folder by ID"""
@@ -142,17 +121,17 @@ class FolderRepository(BaseRepository):
         cursor.execute('SELECT * FROM folders ORDER BY path')
         return [dict(row) for row in cursor.fetchall()]
 
-    def rename(self, folder_id: int, new_name: str, rename_physical: bool = True) -> bool:
+    def rename(self, folder_id: int, new_name: str, rename_physical: bool = False) -> bool:
         """
-        Rename a folder with optional physical folder rename.
+        Rename a folder (virtual - database only).
 
-        Renames both the database entry and physical folders on disk.
-        Also updates all asset paths affected by the rename.
+        Updates the folder name and path in the database.
+        No physical file operations - folders are virtual.
 
         Args:
             folder_id: ID of folder to rename
             new_name: New folder name
-            rename_physical: Whether to rename physical folders on disk
+            rename_physical: Deprecated, ignored (kept for API compatibility)
 
         Returns:
             True if successful
@@ -169,10 +148,10 @@ class FolderRepository(BaseRepository):
                 parent_id = result['parent_id']
                 old_path = result['path'] or ""
 
-                # Sanitize new name for filesystem
+                # Sanitize new name
                 safe_new_name = Config.sanitize_filename(new_name)
 
-                # Calculate new path
+                # Calculate new virtual path
                 if parent_id is not None:
                     cursor.execute('SELECT path FROM folders WHERE id = ?', (parent_id,))
                     parent_result = cursor.fetchone()
@@ -181,19 +160,13 @@ class FolderRepository(BaseRepository):
                 else:
                     new_path = safe_new_name
 
-                # Rename physical folders first (can fail, rollback possible)
-                if rename_physical and old_path:
-                    success, error = self._rename_physical_folders(old_path, new_path)
-                    if not success:
-                        # Continue with database update even if physical fails
-                        pass
-
+                # Virtual folders - database update only
                 cursor.execute(
                     'UPDATE folders SET name = ?, path = ?, modified_date = ? WHERE id = ?',
                     (new_name, new_path, datetime.now(), folder_id)
                 )
 
-                # Update child folder paths
+                # Update child folder paths (virtual hierarchy)
                 if old_path:
                     cursor.execute(
                         'UPDATE folders SET path = REPLACE(path, ?, ?) WHERE path LIKE ?',
@@ -204,96 +177,32 @@ class FolderRepository(BaseRepository):
         except Exception as e:
             return False
 
-    def _rename_physical_folders(self, old_path: str, new_path: str) -> Tuple[bool, str]:
+    def delete(self, folder_id: int, delete_physical: bool = False) -> bool:
         """
-        Rename physical folders for each asset type.
+        Delete folder by ID (virtual - database only).
 
-        Renames folders at: library/{type}/{old_path}/ -> library/{type}/{new_path}/
-
-        Args:
-            old_path: Old folder path relative to type folder
-            new_path: New folder path relative to type folder
-
-        Returns:
-            Tuple of (success, error_message)
-        """
-        renamed = []
-        try:
-            library_folder = Config.get_library_folder()
-            for asset_type in Config.ASSET_TYPES:
-                type_folder = library_folder / asset_type
-                old_physical = type_folder / old_path
-                new_physical = type_folder / new_path
-
-                if old_physical.exists():
-                    # Ensure parent of new path exists
-                    new_physical.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(str(old_physical), str(new_physical))
-                    renamed.append((old_physical, new_physical))
-
-            return True, ""
-
-        except Exception as e:
-            # Rollback: restore original folder names
-            for old_p, new_p in reversed(renamed):
-                try:
-                    os.replace(str(new_p), str(old_p))
-                except Exception:
-                    pass
-            return False, str(e)
-
-    def delete(self, folder_id: int, delete_physical: bool = True) -> bool:
-        """
-        Delete folder by ID with optional physical folder deletion.
+        Removes the folder from the database. Assets that were in this
+        folder remain in place (physically) but lose this folder membership.
 
         Args:
             folder_id: ID of folder to delete
-            delete_physical: Whether to delete physical folders on disk
+            delete_physical: Deprecated, ignored (kept for API compatibility)
 
         Returns:
             True if successful
         """
         try:
-            # Get folder path before deleting
-            folder = self.get_by_id(folder_id)
-            folder_path = folder.get('path') if folder else None
-
             with self._transaction() as conn:
                 cursor = conn.cursor()
                 cursor.execute('DELETE FROM folders WHERE id = ?', (folder_id,))
                 success = cursor.rowcount > 0
 
-            # Delete physical folders after database deletion
-            if success and delete_physical and folder_path:
-                self._delete_physical_folders(folder_path)
+            # Virtual folders - no physical deletion
+            # Assets remain in their physical locations
 
             return success
         except Exception as e:
             return False
-
-    def _delete_physical_folders(self, folder_path: str):
-        """
-        Delete physical folders for each asset type.
-
-        Only deletes empty folders (does not delete assets).
-
-        Args:
-            folder_path: Folder path relative to type folder
-        """
-        try:
-            library_folder = Config.get_library_folder()
-            for asset_type in Config.ASSET_TYPES:
-                type_folder = library_folder / asset_type
-                physical_path = type_folder / folder_path
-
-                if physical_path.exists():
-                    # Only delete if empty (safety)
-                    try:
-                        physical_path.rmdir()  # Only works if empty
-                    except OSError:
-                        pass
-        except Exception as e:
-            pass
 
     def get_full_path(self, folder_id: int) -> Optional[str]:
         """
@@ -317,6 +226,27 @@ class FolderRepository(BaseRepository):
             (parent_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_descendant_ids(self, folder_id: int) -> List[int]:
+        """
+        Get all descendant folder IDs (recursive).
+        
+        Returns the folder_id itself plus all nested children at any depth.
+        Used for recursive folder filtering (click parent, see all nested items).
+        
+        Args:
+            folder_id: Parent folder ID
+            
+        Returns:
+            List of folder IDs including the parent and all descendants
+        """
+        result = [folder_id]
+        children = self.get_children(folder_id)
+        for child in children:
+            child_id = child.get('id')
+            if child_id:
+                result.extend(self.get_descendant_ids(child_id))
+        return result
 
     def update_parent(self, folder_id: int, new_parent_id: int) -> bool:
         """

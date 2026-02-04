@@ -43,9 +43,12 @@ class BaseRepository:
 
         if not hasattr(BaseRepository._local, 'connection') or BaseRepository._local.connection is None:
             # Thread-local connections ensure thread safety without needing check_same_thread=False
+            # isolation_level=None enables autocommit so readers always see latest committed data
+            # (critical for seeing changes made by external processes like Blender addon)
             BaseRepository._local.connection = sqlite3.connect(
                 str(BaseRepository._db_path),
-                timeout=30.0
+                timeout=30.0,
+                isolation_level=None
             )
             BaseRepository._local.connection.execute("PRAGMA foreign_keys = ON")
             BaseRepository._local.connection.execute("PRAGMA journal_mode = WAL")
@@ -57,6 +60,7 @@ class BaseRepository:
     def _transaction(self):
         """Context manager for database transactions"""
         conn = self._get_connection()
+        conn.execute("BEGIN")
         try:
             yield conn
             conn.commit()

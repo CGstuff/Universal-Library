@@ -157,6 +157,8 @@ class ThumbnailLoader(QObject):
 
         path = Path(thumbnail_path)
         if not path.exists():
+            # File missing (possibly moved to archive) - emit failed so UI can refresh from DB
+            self.thumbnail_failed.emit(asset_uuid, "File not found (may have been archived)")
             return None
 
         self.total_requests += 1

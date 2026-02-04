@@ -634,8 +634,32 @@ class AssetRepository(BaseRepository):
         return self._versions.get_latest_version(version_group_id)
 
     def create_new_version(self, version_group_id: str, asset_data: Dict[str, Any]) -> Optional[int]:
-        """Create a new version of an existing asset."""
-        return self._versions.create_new_version(version_group_id, asset_data)
+        """
+        Create a new version of an existing asset.
+        
+        Automatically copies folder memberships from the previous latest version
+        to preserve folder organization.
+        """
+        # Get the current latest version's UUID before creating new version
+        latest = self._versions.get_latest_version(version_group_id)
+        source_uuid = latest.get('uuid') if latest else None
+        
+        # Create the new version
+        result = self._versions.create_new_version(version_group_id, asset_data)
+        
+        # Copy folder memberships from source to new version
+        if result and source_uuid and 'uuid' in asset_data:
+            new_uuid = asset_data['uuid']
+            try:
+                # Import here to avoid circular imports
+                from .asset_folder_repository import AssetFolderRepository
+                folder_repo = AssetFolderRepository()
+                folder_repo.copy_folders_to_asset(source_uuid, new_uuid)
+                folder_repo.close()
+            except Exception as e:
+                logger.warning(f"Failed to copy folder memberships to new version: {e}")
+        
+        return result
 
     def set_as_latest(self, uuid: str) -> bool:
         """Set a specific version as the latest."""

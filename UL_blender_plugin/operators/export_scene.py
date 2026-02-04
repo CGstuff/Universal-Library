@@ -224,13 +224,14 @@ class UAL_OT_export_scene(Operator):
 
                 # Use previous version label for archived paths
                 prev_blend_filename = f"{self.asset_name}.{previous_version_label}.blend"
+                prev_thumbnail_filename = f"thumbnail.{previous_version_label}.png"
                 library.update_asset(self.source_uuid, {
                     'is_latest': 0,
                     'is_cold': 1,
                     'is_immutable': 1,
                     'cold_storage_path': str(prev_archive_folder),
                     'blend_backup_path': str(prev_archive_folder / prev_blend_filename),
-                    'thumbnail_path': str(prev_archive_folder / "thumbnail.png"),
+                    'thumbnail_path': str(prev_archive_folder / prev_thumbnail_filename),
                 })
 
             # Export as .blend file (full scene, same pattern as collection export)
@@ -246,9 +247,16 @@ class UAL_OT_export_scene(Operator):
             from ..utils.current_reference_helper import create_current_reference
             create_current_reference(blend_path)
 
-            # Generate thumbnail (viewport capture of scene objects)
-            thumbnail_path = library_folder / "thumbnail.png"
-            self._generate_thumbnail(context, scene, str(thumbnail_path))
+            # Generate thumbnail (versioned, viewport capture of scene objects)
+            thumbnail_filename = f"thumbnail.{version_label}.png"
+            thumbnail_versioned = library_folder / thumbnail_filename
+            self._generate_thumbnail(context, scene, str(thumbnail_versioned))
+            
+            # Create thumbnail.current.png (stable path for cache watching)
+            thumbnail_current = library_folder / "thumbnail.current.png"
+            if thumbnail_versioned.exists():
+                shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            thumbnail_path = thumbnail_current  # DB stores .current for latest
 
             # Collect metadata
             metadata = collect_scene_metadata(scene)
@@ -274,11 +282,11 @@ class UAL_OT_export_scene(Operator):
             )
             write_json_metadata(json_path, json_metadata)
 
-            # Copy new version's files to its archive
+            # Copy new version's files to its archive (versioned thumbnail, not .current)
             archive_folder = library.get_archive_folder_path(
                 asset_id, self.asset_name, variant_name, version_label, 'scene'
             )
-            for src_file in [blend_path, thumbnail_path, json_path]:
+            for src_file in [blend_path, thumbnail_versioned, json_path]:
                 if src_file.exists():
                     shutil.copy2(str(src_file), str(archive_folder / src_file.name))
 
@@ -325,6 +333,10 @@ class UAL_OT_export_scene(Operator):
 
             # Add the new asset/version
             library.add_asset(asset_data)
+
+            # Copy folder memberships from source to new version
+            if is_new_version and self.source_uuid:
+                library.copy_folders_to_asset(self.source_uuid, asset_uuid)
 
             if is_new_version:
                 self.report({'INFO'}, f"Exported scene '{self.asset_name}' as {version_label}")

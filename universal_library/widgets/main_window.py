@@ -307,6 +307,13 @@ class MainWindow(QMainWindow):
 
         # Thumbnail loaded -> refresh asset data from DB (piggyback on thumbnail cache invalidation)
         self._thumbnail_loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
+        # Thumbnail failed (file missing) -> also refresh, may indicate version change
+        self._thumbnail_loader.thumbnail_failed.connect(self._on_thumbnail_failed)
+
+    def _on_thumbnail_failed(self, uuid: str, error_message: str):
+        """When thumbnail file is missing, refresh asset from DB (may have new version)"""
+        # Use same logic as thumbnail_loaded - check for version changes
+        self._on_thumbnail_loaded(uuid, None)
 
     def _on_thumbnail_loaded(self, uuid: str, pixmap):
         """When thumbnail reloads from disk, also refresh asset data from DB"""
@@ -1027,31 +1034,34 @@ class MainWindow(QMainWindow):
         self._asset_model.set_assets(assets)
 
     def _on_asset_updated(self, uuid: str):
-        """Handle asset updated event - refresh comment status for specific asset"""
+        """Handle asset updated event - full refresh of asset data from database"""
         if not uuid:
             return
 
-        # Get review database for comment status
+        # Clear thumbnail cache so updated thumbnails reload
+        thumbnail_loader = get_thumbnail_loader()
+        thumbnail_loader.clear_cache()
+
+        # Full refresh from database (includes is_latest, thumbnail_path, folders_v2, tags_v2)
+        self._asset_model.refresh_asset(uuid)
+
+        # Also refresh review status
         review_db = get_review_database()
-
-        # Get the asset's current data from model
         asset = self._asset_model.get_asset_by_uuid(uuid)
-        if not asset:
-            return
+        if asset:
+            version_label = asset.get('version_label', 'v001')
+            version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
+            review_status = review_db.get_review_status(uuid, version_label, version_group_id)
 
-        # Refresh comment/review status
-        version_label = asset.get('version_label', 'v001')
-        # Pass version_group_id for cycle lookup (cycles span all versions in group)
-        version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
-        review_status = review_db.get_review_status(uuid, version_label, version_group_id)
+            updates = {
+                'has_unresolved_comments': review_status.get('unresolved_notes', 0) > 0,
+                'unresolved_comment_count': review_status.get('unresolved_notes', 0),
+                'review_state': review_status.get('review_state')
+            }
+            self._asset_model.update_asset(uuid, updates)
 
-        # Update the asset in the model with new comment/review data
-        updates = {
-            'has_unresolved_comments': review_status.get('unresolved_notes', 0) > 0,
-            'unresolved_comment_count': review_status.get('unresolved_notes', 0),
-            'review_state': review_status.get('review_state')
-        }
-        self._asset_model.update_asset(uuid, updates)
+        # Re-filter in case is_latest changed (affects show_only_latest filter)
+        self._proxy_model.invalidateFilter()
 
     def _show_settings(self):
         """Show settings dialog"""

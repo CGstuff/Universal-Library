@@ -336,10 +336,11 @@ class AssetManager(QObject):
             self.operation_error.emit("regenerate_thumbnail", error_msg)
             return False, "No USD file path for this asset"
 
-        # Get or create thumbnail path
+        # Get or create thumbnail path (versioned)
         thumbnail_path = asset.get('thumbnail_path', '')
         if not thumbnail_path:
-            thumbnail_path = str(Path(usd_path).parent / "thumbnail.png")
+            version_label = asset.get('version_label', 'v001')
+            thumbnail_path = str(Path(usd_path).parent / f"thumbnail.{version_label}.png")
 
         success = self._blender_service.queue_regenerate_thumbnail(
             uuid=uuid,

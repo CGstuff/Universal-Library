@@ -353,7 +353,10 @@ class AssetScanner:
         """
         Find thumbnail file for a .blend file.
 
-        Checks for thumbnail.png in the same directory.
+        Priority order:
+        1. thumbnail.current.png (stable path for latest, enables cache watching)
+        2. thumbnail.vXXX.png (versioned, for archives)
+        3. thumbnail.png (backward compatibility)
 
         Args:
             blend_path: Path to .blend file
@@ -361,9 +364,26 @@ class AssetScanner:
         Returns:
             Thumbnail path string or None
         """
+        import re
+        
+        # First try thumbnail.current.png (latest version's stable path)
+        current_thumbnail = blend_path.parent / "thumbnail.current.png"
+        if current_thumbnail.exists():
+            return str(current_thumbnail)
+        
+        # Try to extract version label from blend filename (e.g., AssetName.v001.blend)
+        version_match = re.search(r'\.(v\d{3,})\.blend$', blend_path.name, re.IGNORECASE)
+        if version_match:
+            version_label = version_match.group(1)
+            versioned_thumbnail = blend_path.parent / f"thumbnail.{version_label}.png"
+            if versioned_thumbnail.exists():
+                return str(versioned_thumbnail)
+        
+        # Fallback to unversioned thumbnail.png (backward compatibility)
         thumbnail_path = blend_path.parent / "thumbnail.png"
         if thumbnail_path.exists():
             return str(thumbnail_path)
+        
         return None
 
     def _generate_uuid(self, file_path: Path) -> str:

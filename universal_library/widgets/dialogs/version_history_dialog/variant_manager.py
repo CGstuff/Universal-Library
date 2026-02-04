@@ -153,12 +153,13 @@ class VariantManager:
             return False
 
         try:
-            # Copy files
-            new_blend = library_folder / f"{asset_name}.blend"
+            # Copy files (versioned - new variant starts at v001)
+            new_version_label = "v001"
+            new_blend = library_folder / f"{asset_name}.{new_version_label}.blend"
             shutil.copy2(blend_path, new_blend)
 
             if thumb_exists:
-                new_thumbnail = library_folder / "thumbnail.png"
+                new_thumbnail = library_folder / f"thumbnail.{new_version_label}.png"
                 shutil.copy2(thumbnail_path, new_thumbnail)
             else:
                 new_thumbnail = None
@@ -182,6 +183,10 @@ class VariantManager:
                 'source_application': version.get('source_application', 'Unknown'),
                 'representation_type': version.get('representation_type', 'none'),
                 'variant_set': variant_set,
+                # Versioning fields - new variant starts at v001
+                'version': 1,
+                'version_label': new_version_label,
+                'is_latest': 1,
             }
 
             # Create in database

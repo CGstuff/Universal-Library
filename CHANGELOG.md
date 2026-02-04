@@ -5,10 +5,40 @@ All notable changes to Universal Library will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Planned
+- Asset dependency tracking
+- Batch export from Blender
 
 ---
 
-## [1.0.0] - 2026-02-03
+## [1.1.0] - 2026-02-04
+
+### Changed
+
+**Virtual Folders**
+- Replaced physical folder system with virtual folders
+- Folders are now database-only organizational containers
+- Moving assets between folders no longer moves files on disk
+- Ensures linked/instanced assets never have broken paths
+- Drag-and-drop folder nesting now uses database operations
+
+**Thumbnail Versioning**
+- Thumbnails now use versioned filenames: `thumbnail.v001.png`, `thumbnail.v002.png`
+- Added `thumbnail.current.png` as stable reference for latest version (same pattern as `.current.blend`)
+- Each version retains its own thumbnail when archived
+- Version picker shows correct thumbnail per version
+- Auto-refresh works via mtime watching on `thumbnail.current.png`
+
+### Fixed
+- Fixed folder memberships not persisting when creating new versions
+- Fixed assets disappearing from folder view after refresh (SQLite WAL stale reads)
+- Fixed `refresh_asset()` wiping folder/tag enrichment data
+
+---
+
+## [1.0.0] - 2025-01-31
 
 ### Added
 
@@ -89,5 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/CGstuff/Universal-Library/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/CGstuff/Universal-Library/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/CGstuff/Universal-Library/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/CGstuff/Universal-Library/releases/tag/v1.0.0

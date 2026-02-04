@@ -216,6 +216,10 @@ class AssetListModel(QAbstractListModel):
         updated_data = db_service.get_asset_by_uuid(uuid)
 
         if updated_data:
+            # Enrich with tags_v2 and folders_v2 (not in raw database row)
+            updated_data['tags_v2'] = db_service.get_asset_tags(uuid)
+            updated_data['folders_v2'] = db_service.get_asset_folders(uuid)
+            
             for i, asset in enumerate(self._assets):
                 if asset.get('uuid') == uuid:
                     self._assets[i] = updated_data

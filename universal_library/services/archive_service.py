@@ -127,7 +127,7 @@ class ArchiveService:
             safe_name = Config.sanitize_filename(asset_name)
             blend_filename = f"{safe_name}.{version_label}.blend"
             json_filename = f"{safe_name}.{version_label}.json"
-            thumbnail_filename = "thumbnail.png"
+            thumbnail_filename = f"thumbnail.{version_label}.png"
 
             paths = {
                 'library_path': str(library_dir),
@@ -262,9 +262,9 @@ class ArchiveService:
         """Copy files from library to a specific archive version folder.
 
         Copies all asset files including:
-        - .blend files
-        - .json metadata files
-        - thumbnail.png
+        - .blend files (versioned: AssetName.vXXX.blend)
+        - .json metadata files (versioned: AssetName.vXXX.json)
+        - thumbnail files (versioned: thumbnail.vXXX.png)
         - Any other asset files
         """
         if not library_dir.exists():

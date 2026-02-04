@@ -145,6 +145,9 @@ class RetiredAssetsDialog(QDialog):
     def _load_retired_assets(self):
         """Load retired assets from service."""
         self._retired_assets = self._retire_service.get_retired_assets()
+        # DEBUG: Check what thumbnail paths we're getting
+        for a in self._retired_assets:
+            print(f"[RETIRE DEBUG] {a.get('name')} {a.get('version_label')}: {a.get('thumbnail_path')}")
         self._populate_table()
 
     def _populate_table(self, filter_text: str = ""):

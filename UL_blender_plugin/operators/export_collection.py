@@ -269,9 +269,17 @@ class UAL_OT_export_collection(Operator):
             blend_path = library_folder / f"{self.asset_name}.{version_label}.blend"
             self._save_collection_blend(context, collection, str(blend_path))
 
-            # Generate thumbnail
-            thumbnail_path = library_folder / "thumbnail.png"
-            self._generate_thumbnail(context, collection, str(thumbnail_path))
+            # Generate thumbnail (versioned)
+            thumbnail_filename = f"thumbnail.{version_label}.png"
+            thumbnail_versioned = library_folder / thumbnail_filename
+            self._generate_thumbnail(context, collection, str(thumbnail_versioned))
+            
+            # Create thumbnail.current.png (stable path for cache watching)
+            import shutil
+            thumbnail_current = library_folder / "thumbnail.current.png"
+            if thumbnail_versioned.exists():
+                shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            thumbnail_path = thumbnail_current  # DB stores .current for latest
 
             # Collect metadata
             metadata = collect_collection_metadata(collection)
@@ -322,6 +330,10 @@ class UAL_OT_export_collection(Operator):
 
             # Add the new asset/version
             library.add_asset(asset_data)
+
+            # Copy folder memberships from source to new version
+            if is_new_version and self.source_uuid:
+                library.copy_folders_to_asset(self.source_uuid, asset_uuid)
 
             # Update metadata on collection objects
             self._update_object_metadata(context, collection, asset_uuid,

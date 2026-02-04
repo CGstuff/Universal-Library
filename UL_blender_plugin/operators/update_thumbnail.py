@@ -71,7 +71,7 @@ class UAL_OT_update_thumbnail(Operator):
             version_label = asset.get('version_label', metadata.get('version_label', 'v001'))
             is_latest = asset.get('is_latest', 1)
 
-            # Determine thumbnail path based on whether this is latest or archived
+            # Determine thumbnail folder based on whether this is latest or archived
             if is_latest:
                 # Latest version: thumbnail in library folder
                 thumbnail_folder = library.get_library_folder_path(
@@ -83,7 +83,8 @@ class UAL_OT_update_thumbnail(Operator):
                     asset_id, asset_name, variant_name, version_label, asset_type
                 )
 
-            thumbnail_path = thumbnail_folder / "thumbnail.png"
+            # Versioned thumbnail filename
+            thumbnail_versioned = thumbnail_folder / f"thumbnail.{version_label}.png"
 
             # Collect objects to capture
             # Include active object and its hierarchy (children, armature targets, etc.)
@@ -93,11 +94,11 @@ class UAL_OT_update_thumbnail(Operator):
                 self.report({'ERROR'}, "No visible objects to capture")
                 return {'CANCELLED'}
 
-            # Capture the thumbnail
+            # Capture the thumbnail (versioned)
             success = capture_viewport_thumbnail(
                 context,
                 objects,
-                str(thumbnail_path),
+                str(thumbnail_versioned),
                 size=256,
                 asset_type=asset_type
             )
@@ -105,6 +106,15 @@ class UAL_OT_update_thumbnail(Operator):
             if not success:
                 self.report({'ERROR'}, "Failed to capture thumbnail")
                 return {'CANCELLED'}
+
+            # For latest version, also update thumbnail.current.png (cache watching)
+            import shutil
+            if is_latest:
+                thumbnail_current = thumbnail_folder / "thumbnail.current.png"
+                shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+                thumbnail_path = thumbnail_current  # DB stores .current for latest
+            else:
+                thumbnail_path = thumbnail_versioned  # DB stores versioned for archived
 
             # Update database if path changed
             current_db_path = asset.get('thumbnail_path', '')

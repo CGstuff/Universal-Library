@@ -105,13 +105,54 @@ class VersionActionHandlers:
 
     def on_promote(self) -> bool:
         """Handle promote to latest action."""
-        return self._execute_action(
-            "promote",
+        version = self._get_version()
+        if not version:
+            return False
+
+        uuid = version.get('uuid')
+        version_label = version.get('version_label', 'Unknown')
+        version_group_id = version.get('version_group_id')
+
+        # Find current latest (will be demoted)
+        old_latest_uuid = None
+        if version_group_id:
+            versions = self._db_service.get_asset_versions(version_group_id)
+            for v in versions:
+                if v.get('is_latest') and v.get('uuid') != uuid:
+                    old_latest_uuid = v.get('uuid')
+                    break
+
+        reply = QMessageBox.question(
+            self._parent,
             "Promote Version",
-            "Promote {label} to be the latest version?\n\nThe current latest version will be demoted.",
-            self._db_service.promote_asset_to_latest,
-            "{label} is now the latest version."
+            f"Promote {version_label} to be the latest version?\n\nThe current latest version will be demoted.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return False
+
+        result = self._db_service.promote_asset_to_latest(uuid)
+        success = result[0] if isinstance(result, tuple) else result
+
+        if success:
+            QMessageBox.information(
+                self._parent, "Success",
+                f"{version_label} is now the latest version."
+            )
+            self._refresh()
+            
+            # Notify main window to update both old and new latest
+            event_bus = get_event_bus()
+            if old_latest_uuid:
+                event_bus.asset_updated.emit(old_latest_uuid)
+            event_bus.asset_updated.emit(uuid)
+            
+            return True
+        else:
+            error_msg = result[1] if isinstance(result, tuple) else "Failed to promote."
+            QMessageBox.warning(self._parent, "Error", error_msg)
+            return False
 
     def on_cold_storage(self) -> bool:
         """Handle cold storage toggle action."""

@@ -211,6 +211,20 @@ class LibraryConnection:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_assets_favorite ON assets(is_favorite)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id)')
 
+        # Asset folders junction table (for multi-folder membership)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS asset_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_uuid TEXT NOT NULL,
+                folder_id INTEGER NOT NULL,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+                UNIQUE(asset_uuid, folder_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_folders_uuid ON asset_folders(asset_uuid)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_folders_folder ON asset_folders(folder_id)')
+
         # Insert root folder if not exists
         cursor.execute("SELECT COUNT(*) FROM folders WHERE id = 1")
         if cursor.fetchone()[0] == 0:
@@ -388,6 +402,70 @@ class LibraryConnection:
 
         self._connection.commit()
         return cursor.rowcount > 0
+
+    def _ensure_asset_folders_table(self):
+        """
+        Create asset_folders junction table if it doesn't exist.
+        
+        Forward-compatible: the Blender addon creates the table if the
+        desktop app hasn't run schema migration yet.
+        """
+        if not self._connection:
+            self.connect()
+        
+        cursor = self._connection.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS asset_folders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_uuid TEXT NOT NULL,
+                folder_id INTEGER NOT NULL,
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE,
+                UNIQUE(asset_uuid, folder_id)
+            )
+        ''')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_folders_uuid ON asset_folders(asset_uuid)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_folders_folder ON asset_folders(folder_id)')
+        self._connection.commit()
+
+    def copy_folders_to_asset(self, source_uuid: str, target_uuid: str) -> bool:
+        """
+        Copy folder memberships from one asset to another.
+        
+        Used when creating new versions to inherit folder organization.
+        
+        Args:
+            source_uuid: Source asset UUID (e.g., v001)
+            target_uuid: Target asset UUID (e.g., v002)
+            
+        Returns:
+            True if successful
+        """
+        if not self._connection:
+            self.connect()
+        
+        self._ensure_asset_folders_table()
+        
+        try:
+            cursor = self._connection.cursor()
+            
+            # Get folders from source asset
+            cursor.execute('''
+                SELECT folder_id FROM asset_folders WHERE asset_uuid = ?
+            ''', (source_uuid,))
+            folder_ids = [row[0] for row in cursor.fetchall()]
+            
+            # Add target to same folders
+            for folder_id in folder_ids:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO asset_folders (asset_uuid, folder_id, created_date)
+                    VALUES (?, ?, ?)
+                ''', (target_uuid, folder_id, datetime.now()))
+            
+            self._connection.commit()
+            return True
+        except Exception as e:
+            return False
 
     def delete_asset(self, asset_uuid: str) -> bool:
         """Delete asset from library"""

@@ -186,7 +186,10 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
                 self._folder_id = folder_id
                 changed = True
 
-        new_folder_ids = folder_ids if folder_ids is not None else set()
+        # Combine parent folder + children for recursive filtering
+        new_folder_ids = set(folder_ids) if folder_ids else set()
+        if self._folder_id is not None and self._folder_id > 0:
+            new_folder_ids.add(self._folder_id)
         if self._folder_ids != new_folder_ids:
             self._folder_ids = new_folder_ids
             changed = True

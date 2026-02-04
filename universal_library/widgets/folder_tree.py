@@ -4,11 +4,18 @@ FolderTree - Folder navigation tree
 Pattern: QTreeWidget for folder hierarchy
 Based on animation_library architecture.
 
-Physical Type Folders:
-- meshes, materials, rigs, lights, cameras, collections, other
-- These are system folders that cannot be deleted from the app
-- If physically deleted, they are automatically recreated
-- User folders are created as children of these type folders
+Virtual Folder System:
+- Type folders (meshes, materials, rigs, etc.) are physical for asset type organization
+- User folders are VIRTUAL (database only) - no physical directories created
+- Moving assets between folders = database update only, files never move
+- This ensures linked/instanced assets never have broken paths
+
+Layout:
+    All Assets, Favorites, Recent (virtual special folders)
+    ─────────────────
+    Meshes, Materials, Rigs... (physical type folders - filter by asset type)
+    ─────────────────
+    User Folder 1, User Folder 2... (virtual database folders - organize assets)
 """
 
 from pathlib import Path
@@ -125,6 +132,7 @@ class FolderTree(QTreeWidget):
 
         # Create physical type folders (system folders)
         # These folders map to physical directories on disk
+        # User subfolders under types are virtual (database-only)
         self._create_type_folders()
 
         # Apply studio mode visibility to review folder
@@ -203,7 +211,7 @@ class FolderTree(QTreeWidget):
         - Map to physical directories (library/meshes/, library/materials/, etc.)
         - Cannot be deleted from the app
         - Auto-recreate if physically deleted
-        - Contain user-created subfolders
+        - User subfolders are virtual (database-only) to prevent broken links
         """
         library_folder = Config.get_library_folder()
 
@@ -249,150 +257,68 @@ class FolderTree(QTreeWidget):
                 'display_name': display_name
             })
 
-            # Styling - slightly different from virtual folders
+            # Styling
             font = item.font(0)
             font.setBold(True)
             item.setFont(0, font)
 
-            # Store reference for building user folder tree
+            # Store reference
             self._type_folder_items[asset_type] = item
 
-            # Load user subfolders for this type folder
-            self._load_type_subfolders(item, physical_path)
+            # Load virtual subfolders from database for this asset type
+            self._load_virtual_subfolders(item, asset_type)
 
-    def _load_type_subfolders(self, parent_item: QTreeWidgetItem, physical_path: Path):
+    def _load_virtual_subfolders(self, parent_item: QTreeWidgetItem, asset_type: str):
         """
-        Load user-created subfolders from a physical type folder.
-
-        Scans the physical directory for subfolders and creates tree items.
-
-        Args:
-            parent_item: Parent tree item (type folder)
-            physical_path: Physical path to scan
+        Load virtual subfolders from database for a specific asset type.
+        
+        Folders are identified by having 'asset_type:{type}' in their description.
         """
-        try:
-            if not physical_path.exists():
-                return
-
-            # Get all subdirectories (excluding asset folders)
-            # Asset folders have the structure: AssetName/Variant/
-            # User folders don't have that pattern
-            for child_path in sorted(physical_path.iterdir()):
-                if not child_path.is_dir():
-                    continue
-
-                # Skip hidden folders
-                if child_path.name.startswith('.'):
-                    continue
-
-                # Check if this is an asset folder (has variant subfolders with .blend files)
-                is_asset_folder = self._is_asset_folder(child_path)
-
-                if not is_asset_folder:
-                    # This is a user folder
-                    self._create_user_folder_item(parent_item, child_path)
-
-        except Exception as e:
-            pass
-
-    def _is_asset_folder(self, folder_path: Path) -> bool:
-        """
-        Check if a folder is an asset folder (contains variant subfolders with .blend files).
-
-        Asset folder structure: AssetName/Variant/*.blend
-
-        Args:
-            folder_path: Path to check
-
-        Returns:
-            True if this looks like an asset folder
-        """
-        try:
-            for child in folder_path.iterdir():
-                if child.is_dir():
-                    # Check if child folder contains .blend files
-                    blend_files = list(child.glob('*.blend'))
-                    if blend_files:
-                        return True
-            return False
-        except Exception:
-            return False
-
-    def _create_user_folder_item(self, parent_item: QTreeWidgetItem, folder_path: Path):
-        """
-        Create a tree item for a user folder.
-
-        Args:
-            parent_item: Parent tree item
-            folder_path: Physical path of the folder
-        """
-        item = QTreeWidgetItem(parent_item)
-        item.setText(0, folder_path.name)
-
-        # Get parent data to build full context
-        parent_data = parent_item.data(0, Qt.ItemDataRole.UserRole)
-
-        # Propagate asset type from parent
-        # System folders have 'asset_type', user folders have 'parent_type'
-        inherited_type = None
-        if parent_data:
-            inherited_type = parent_data.get('asset_type') or parent_data.get('parent_type')
-
-        item.setData(0, Qt.ItemDataRole.UserRole, {
-            'type': 'user',
-            'folder_name': folder_path.name,
-            'physical_path': str(folder_path),
-            'parent_type': inherited_type
-        })
-
-        # Recursively load nested subfolders
-        self._load_type_subfolders(item, folder_path)
-
-    def _load_user_folders(self):
-        """Load user folders from database and build tree hierarchy"""
-
         folders = self._db_service.get_all_folders()
-
-        # Build folder lookup dictionary
-        folder_dict = {folder['id']: folder for folder in folders}
-
-        # Find root folder ID
-        root_folder_id = None
+        
+        # Find the type root folder
+        type_root_name = f"__type_root_{asset_type}__"
+        type_root_id = None
+        
         for folder in folders:
-            if folder.get('parent_id') is None:
-                root_folder_id = folder['id']
+            if folder.get('name') == type_root_name:
+                type_root_id = folder['id']
                 break
-
-        # Build tree recursively starting from root's children
-        if root_folder_id:
-            self._build_folder_tree(root_folder_id, folder_dict, None)
-
-    def _build_folder_tree(self, parent_id: int, folder_dict: dict, parent_item: QTreeWidgetItem = None):
-        """Recursively build folder tree"""
-
-        # Find all children of this parent
+        
+        if type_root_id is None:
+            return  # No folders for this type yet
+        
+        # Build folder tree for this type
+        folder_dict = {f['id']: f for f in folders}
+        self._build_type_folder_tree(type_root_id, folder_dict, parent_item, asset_type)
+    
+    def _build_type_folder_tree(self, parent_id: int, folder_dict: dict, 
+                                 parent_item: QTreeWidgetItem, asset_type: str):
+        """Recursively build folder tree under a type folder."""
+        
+        # Find children of this parent
         children = [f for f in folder_dict.values() if f.get('parent_id') == parent_id]
         children.sort(key=lambda f: f['name'].lower())
-
+        
         for folder in children:
+            # Skip type root markers
+            if folder['name'].startswith('__type_root_'):
+                continue
+            
             # Create tree item
-            if parent_item is None:
-                item = QTreeWidgetItem(self)
-            else:
-                item = QTreeWidgetItem(parent_item)
-
+            item = QTreeWidgetItem(parent_item)
             item.setText(0, folder['name'])
-
+            
             # Store metadata
             item.setData(0, Qt.ItemDataRole.UserRole, {
                 'type': 'user',
                 'folder_id': folder['id'],
                 'folder_name': folder['name'],
-                'folder_path': folder.get('path', '')
+                'asset_type': asset_type  # Inherit from parent type folder
             })
-
+            
             # Recursively build children
-            self._build_folder_tree(folder['id'], folder_dict, item)
+            self._build_type_folder_tree(folder['id'], folder_dict, item, asset_type)
 
     def _on_selection_changed(self):
         """Handle selection change"""
@@ -422,25 +348,23 @@ class FolderTree(QTreeWidget):
             self._event_bus.emit_folder_selected(Config.VIRTUAL_FOLDER_ALL)
             return
 
-        # Handle user folders (check if they're under a type folder)
+        # Handle user folders (virtual database folders)
         if folder_type == 'user':
-            # Get parent type from the data (set during folder creation)
-            parent_type = data.get('parent_type')
-            physical_path = data.get('physical_path', '')
+            folder_id = data.get('folder_id')
+            asset_type = data.get('asset_type', '')
 
-            if parent_type:
-                # This is a subfolder of a type folder - filter by that type
-                self.asset_type_selected.emit(parent_type)
+            # Filter by asset type if folder is under a type folder
+            if asset_type:
+                self.asset_type_selected.emit(asset_type)
             else:
-                # No parent type, clear type filter
                 self.asset_type_selected.emit('')
 
-            # Emit physical path for subfolder filtering
-            self.physical_path_selected.emit(physical_path)
+            # Clear physical path filter (virtual folders don't use physical paths)
+            self.physical_path_selected.emit('')
 
-            # User folders don't have folder_id (physical folders), emit ALL
-            self.folder_selected.emit(Config.VIRTUAL_FOLDER_ALL)
-            self._event_bus.emit_folder_selected(Config.VIRTUAL_FOLDER_ALL)
+            # Emit folder_id for filtering by folder membership
+            self.folder_selected.emit(folder_id if folder_id else Config.VIRTUAL_FOLDER_ALL)
+            self._event_bus.emit_folder_selected(folder_id if folder_id else Config.VIRTUAL_FOLDER_ALL)
             return
 
         # For virtual folders, clear the asset type filter and physical path filter
@@ -459,44 +383,41 @@ class FolderTree(QTreeWidget):
         """Handle context menu request"""
 
         item = self.itemAt(position)
+        if not item:
+            return
+
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+
         menu = QMenu(self)
 
-        if item:
-            data = item.data(0, Qt.ItemDataRole.UserRole)
+        if data.get('type') == 'system':
+            # Type folder - create subfolder
+            asset_type = data.get('asset_type')
+            create_action = menu.addAction("Create Folder...")
+            action = menu.exec(self.viewport().mapToGlobal(position))
+            if action == create_action:
+                self._create_folder_under_type(item, asset_type)
 
-            if data and data.get('type') == 'system':
-                # System folder context menu (type folders like meshes, materials)
-                # Can create subfolders, but cannot rename or delete
-                create_action = menu.addAction("Create Subfolder...")
-                menu.addSeparator()
-                info_action = menu.addAction("System folder (cannot delete)")
-                info_action.setEnabled(False)
+        elif data.get('type') == 'user':
+            # User folder - create/rename/delete
+            folder_id = data.get('folder_id')
+            asset_type = data.get('asset_type')
 
-                action = menu.exec(self.viewport().mapToGlobal(position))
+            create_action = menu.addAction("Create Subfolder...")
+            menu.addSeparator()
+            rename_action = menu.addAction("Rename...")
+            delete_action = menu.addAction("Delete")
 
-                if action == create_action:
-                    self._create_folder_in_type(item, data)
+            action = menu.exec(self.viewport().mapToGlobal(position))
 
-            elif data and data.get('type') == 'user':
-                # User folder context menu
-                create_action = menu.addAction("Create Subfolder...")
-                menu.addSeparator()
-                rename_action = menu.addAction("Rename...")
-                delete_action = menu.addAction("Delete")
-
-                action = menu.exec(self.viewport().mapToGlobal(position))
-
-                if action == create_action:
-                    self._create_folder_physical(item, data)
-                elif action == rename_action:
-                    self._rename_folder_physical(item, data)
-                elif action == delete_action:
-                    self._delete_folder_physical(item, data)
-        else:
-            # Empty space - no action (must select a type folder)
-            info_action = menu.addAction("Select a type folder to create subfolders")
-            info_action.setEnabled(False)
-            menu.exec(self.viewport().mapToGlobal(position))
+            if action == create_action:
+                self._create_folder_under_type(item, asset_type, folder_id)
+            elif action == rename_action:
+                self._rename_folder(item, folder_id)
+            elif action == delete_action:
+                self._delete_folder(item, folder_id)
 
     def _create_folder(self, parent_id: int):
         """Create new folder (legacy - database only)"""
@@ -528,9 +449,9 @@ class FolderTree(QTreeWidget):
                 f"Failed to create folder '{folder_name}'.\n\nA folder with this name may already exist."
             )
 
-    def _create_folder_in_type(self, parent_item: QTreeWidgetItem, parent_data: dict):
-        """Create a new physical folder inside a type folder"""
-
+    def _create_folder_under_type(self, parent_item: QTreeWidgetItem, asset_type: str, parent_folder_id: int = None):
+        """Create a virtual folder under a type folder or user subfolder."""
+        
         folder_name, ok = QInputDialog.getText(
             self,
             "Create Folder",
@@ -541,154 +462,47 @@ class FolderTree(QTreeWidget):
         if not ok or not folder_name.strip():
             return
 
-        folder_name = Config.sanitize_filename(folder_name.strip())
+        folder_name = folder_name.strip()
 
-        # Get physical path from parent
-        physical_path = Path(parent_data.get('physical_path'))
-        new_folder_path = physical_path / folder_name
+        # Get or create root folder for this asset type
+        if parent_folder_id is None:
+            parent_folder_id = self._get_or_create_type_root(asset_type)
 
-        if new_folder_path.exists():
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"Folder '{folder_name}' already exists."
-            )
-            return
-
-        try:
-            new_folder_path.mkdir(parents=True, exist_ok=False)
-            self._load_folders()
-            self._event_bus.status_message.emit(f"Created folder '{folder_name}'")
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"Failed to create folder: {e}"
-            )
-
-    def _create_folder_physical(self, parent_item: QTreeWidgetItem, parent_data: dict):
-        """Create a new physical subfolder"""
-
-        folder_name, ok = QInputDialog.getText(
-            self,
-            "Create Subfolder",
-            "Folder name:",
-            text="New Folder"
+        folder_id = self._db_service.create_folder(
+            name=folder_name,
+            parent_id=parent_folder_id,
+            description=f"asset_type:{asset_type}"  # Store asset type in description for filtering
         )
 
-        if not ok or not folder_name.strip():
-            return
-
-        folder_name = Config.sanitize_filename(folder_name.strip())
-
-        # Get physical path from parent
-        physical_path = Path(parent_data.get('physical_path'))
-        new_folder_path = physical_path / folder_name
-
-        if new_folder_path.exists():
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"Folder '{folder_name}' already exists."
-            )
-            return
-
-        try:
-            new_folder_path.mkdir(parents=True, exist_ok=False)
+        if folder_id:
             self._load_folders()
-            self._event_bus.status_message.emit(f"Created folder '{folder_name}'")
-        except Exception as e:
+            self._event_bus.folder_added.emit(folder_id)
+        else:
             QMessageBox.warning(
                 self,
                 "Error",
-                f"Failed to create folder: {e}"
+                f"Failed to create folder '{folder_name}'.\n\nA folder with this name may already exist."
             )
 
-    def _rename_folder_physical(self, item: QTreeWidgetItem, data: dict):
-        """Rename a physical user folder"""
-
-        current_name = data.get('folder_name', '')
-        physical_path = Path(data.get('physical_path', ''))
-
-        new_name, ok = QInputDialog.getText(
-            self,
-            "Rename Folder",
-            "New name:",
-            text=current_name
+    def _get_or_create_type_root(self, asset_type: str) -> int:
+        """Get or create the root folder for an asset type."""
+        # Use a special naming convention for type roots
+        root_name = f"__type_root_{asset_type}__"
+        
+        # Check if it exists
+        folders = self._db_service.get_all_folders()
+        for folder in folders:
+            if folder.get('name') == root_name:
+                return folder['id']
+        
+        # Create it under the global root
+        global_root = self._db_service.get_root_folder_id()
+        folder_id = self._db_service.create_folder(
+            name=root_name,
+            parent_id=global_root,
+            description=f"asset_type:{asset_type}"
         )
-
-        if not ok or not new_name.strip() or new_name.strip() == current_name:
-            return
-
-        new_name = Config.sanitize_filename(new_name.strip())
-        new_path = physical_path.parent / new_name
-
-        if new_path.exists():
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"A folder named '{new_name}' already exists."
-            )
-            return
-
-        try:
-            import os
-            os.replace(str(physical_path), str(new_path))
-            self._load_folders()
-            self._event_bus.status_message.emit(f"Renamed folder to '{new_name}'")
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"Failed to rename folder: {e}"
-            )
-
-    def _delete_folder_physical(self, item: QTreeWidgetItem, data: dict):
-        """Delete a physical user folder"""
-
-        folder_name = data.get('folder_name', '')
-        physical_path = Path(data.get('physical_path', ''))
-
-        # Check if folder contains assets
-        if self._folder_contains_assets(physical_path):
-            QMessageBox.warning(
-                self,
-                "Cannot Delete",
-                f"Folder '{folder_name}' contains assets.\n\n"
-                "Move or delete the assets first before deleting the folder."
-            )
-            return
-
-        reply = QMessageBox.question(
-            self,
-            "Delete Folder",
-            f"Delete folder '{folder_name}'?\n\nThis will also delete any empty subfolders.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            import shutil
-            shutil.rmtree(str(physical_path))
-            self._load_folders()
-            self._event_bus.status_message.emit(f"Deleted folder '{folder_name}'")
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Error",
-                f"Failed to delete folder: {e}"
-            )
-
-    def _folder_contains_assets(self, folder_path: Path) -> bool:
-        """Check if a folder or its subfolders contain assets (.blend files)"""
-        try:
-            for blend_file in folder_path.rglob('*.blend'):
-                return True
-            return False
-        except Exception:
-            return True  # Assume it has assets if we can't check
+        return folder_id
 
     def _rename_folder(self, item: QTreeWidgetItem, folder_id: int):
         """Rename folder"""
@@ -819,7 +633,7 @@ class FolderTree(QTreeWidget):
         event.ignore()
 
     def _handle_folder_drop(self, event):
-        """Handle folder-to-folder drop (physical folders)"""
+        """Handle folder-to-folder drop (virtual folders - database only)"""
         if not self._dragged_folder_item:
             event.ignore()
             return
@@ -829,8 +643,13 @@ class FolderTree(QTreeWidget):
             event.ignore()
             return
 
-        source_path = Path(source_data.get('physical_path', ''))
+        source_id = source_data.get('folder_id')
         source_name = source_data.get('folder_name')
+
+        if not source_id:
+            event.ignore()
+            self._dragged_folder_item = None
+            return
 
         target_item = self.itemAt(event.position().toPoint())
 
@@ -847,49 +666,27 @@ class FolderTree(QTreeWidget):
             self._dragged_folder_item = None
             return
 
-        target_path = Path(target_data.get('physical_path', ''))
+        # Determine target parent ID
+        if target_data.get('type') == 'system':
+            # Dropping on a type folder - get or create the type root as parent
+            asset_type = target_data.get('asset_type')
+            target_id = self._get_or_create_type_root(asset_type)
+            target_name = target_data.get('display_name', asset_type)
+        else:
+            # Dropping on a user folder
+            target_id = target_data.get('folder_id')
+            target_name = target_data.get('folder_name')
 
-        # Prevent dropping on self
-        if source_path == target_path:
+        if not target_id:
             event.ignore()
             self._dragged_folder_item = None
             return
 
-        # Prevent dropping into descendant
-        try:
-            source_path.relative_to(target_path)
-            # If this succeeds, source is descendant of target - invalid
-            event.ignore()
-            self._dragged_folder_item = None
-            return
-        except ValueError:
-            pass  # Not a descendant, OK
-
-        # Perform physical folder move
-        new_path = target_path / source_name
-
-        if new_path.exists():
-            QMessageBox.warning(
-                self,
-                "Cannot Move",
-                f"A folder named '{source_name}' already exists in the target location."
-            )
-            event.ignore()
-            self._dragged_folder_item = None
-            return
-
-        try:
-            import shutil
-            shutil.move(str(source_path), str(new_path))
+        # Use the existing database move method
+        if self._move_folder_to_folder(source_id, target_id, source_name, target_name):
             event.setDropAction(Qt.DropAction.MoveAction)
             event.accept()
-            QTimer.singleShot(0, lambda: self._reload_after_move(f"Moved '{source_name}'"))
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Move Failed",
-                f"Failed to move folder: {e}"
-            )
+        else:
             event.ignore()
 
         self._dragged_folder_item = None
@@ -956,7 +753,7 @@ class FolderTree(QTreeWidget):
         self._event_bus.status_message.emit(message)
 
     def _handle_asset_drop(self, event):
-        """Handle asset drop - move assets to physical folder"""
+        """Handle asset drop - move assets to virtual folder (database only)"""
         target_item = self.itemAt(event.position().toPoint())
         if not target_item:
             event.ignore()
@@ -964,20 +761,12 @@ class FolderTree(QTreeWidget):
 
         data = target_item.data(0, Qt.ItemDataRole.UserRole)
         if not data or data.get('type') not in ('system', 'user'):
-            QMessageBox.warning(
-                self,
-                "Cannot Move",
-                "Can only move assets to type folders or user folders."
-            )
             event.ignore()
             return
 
         # Get target folder info
-        target_path = Path(data.get('physical_path', ''))
         folder_name = data.get('folder_name') or data.get('display_name', 'folder')
-
-        # For system folders (type folders), we move to root of that type
-        # For user folders, we move to that subfolder
+        target_asset_type = data.get('asset_type')  # For filtering
 
         # Extract asset UUIDs
         try:
@@ -991,7 +780,7 @@ class FolderTree(QTreeWidget):
             event.ignore()
             return
 
-        # Move assets physically
+        # Virtual folder move - database only
         success_count = 0
         failed_assets = []
 
@@ -1001,45 +790,23 @@ class FolderTree(QTreeWidget):
                 failed_assets.append(uuid)
                 continue
 
-            asset_name = asset.get('name')
             asset_type = asset.get('asset_type', 'mesh')
-            blend_path = asset.get('blend_backup_path')
 
-            if not blend_path:
+            # Check type compatibility
+            if target_asset_type and target_asset_type != asset_type:
                 failed_assets.append(uuid)
                 continue
 
-            # Determine the correct target based on folder type
+            # Get target folder_id
             if data.get('type') == 'system':
-                # Moving to a type folder root
-                target_asset_type = data.get('asset_type')
-                if target_asset_type != asset_type:
-                    # Can't move mesh to materials folder, etc.
-                    failed_assets.append(uuid)
-                    continue
-                # Target is the type folder root (no subfolder)
-                target_subfolder = ""
+                # Moving to type folder root = remove from all folders
+                target_folder_id = None
             else:
-                # Moving to a user subfolder
-                # Get the relative path from the type folder
-                parent_type = data.get('parent_type')
-                if parent_type and parent_type != asset_type:
-                    failed_assets.append(uuid)
-                    continue
+                # Moving to user folder
+                target_folder_id = data.get('folder_id')
 
-                # Calculate relative subfolder path
-                library_folder = Config.get_library_folder()
-                type_folder = library_folder / Config.get_type_folder(asset_type)
-                try:
-                    target_subfolder = str(target_path.relative_to(type_folder))
-                except ValueError:
-                    # Target is not under the type folder
-                    failed_assets.append(uuid)
-                    continue
-
-            # Move the asset using move_asset_to_folder
-            # We need to pass the target subfolder path
-            success, msg = self._move_asset_physically(uuid, target_subfolder)
+            # Virtual move - database only, no file operations
+            success, msg = self._db_service.move_asset_to_folder(uuid, target_folder_id)
             if success:
                 success_count += 1
             else:
@@ -1047,109 +814,16 @@ class FolderTree(QTreeWidget):
 
         if success_count > 0:
             event.acceptProposedAction()
-            if failed_assets:
-                QMessageBox.information(
-                    self,
-                    "Assets Moved",
-                    f"Moved {success_count} asset(s) to '{folder_name}'.\n\n"
-                    f"{len(failed_assets)} asset(s) could not be moved (type mismatch or error)."
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Assets Moved",
-                    f"Moved {success_count} asset(s) to '{folder_name}'."
-                )
-            # Emit event to refresh asset list
             self._event_bus.assets_moved.emit(asset_uuids, -1, success_count)
+            self._event_bus.status_message.emit(f"Moved {success_count} asset(s) to '{folder_name}'")
         else:
             event.ignore()
-            QMessageBox.warning(
-                self,
-                "Move Failed",
-                "Could not move any assets. Assets can only be moved within the same type folder."
-            )
-
-    def _move_asset_physically(self, asset_uuid: str, target_subfolder: str) -> tuple:
-        """
-        Move an asset to a different subfolder within its type folder.
-
-        Args:
-            asset_uuid: Asset UUID to move
-            target_subfolder: Relative subfolder path within the type folder
-
-        Returns:
-            Tuple of (success, message)
-        """
-        import shutil
-
-        asset = self._db_service.get_asset_by_uuid(asset_uuid)
-        if not asset:
-            return False, "Asset not found"
-
-        asset_name = asset.get('name')
-        asset_type = asset.get('asset_type', 'mesh')
-        blend_path = asset.get('blend_backup_path')
-
-        if not blend_path:
-            return False, "No blend file path"
-
-        blend_file = Path(blend_path)
-        if not blend_file.exists():
-            return False, "Blend file not found"
-
-        # Current location: library/{type}/{subfolder?}/{asset_name}/{variant}/
-        variant_folder = blend_file.parent
-        old_asset_folder = variant_folder.parent
-
-        # Calculate new location
-        library_folder = Config.get_library_folder()
-        type_folder = library_folder / Config.get_type_folder(asset_type)
-
-        if target_subfolder:
-            new_asset_folder = type_folder / target_subfolder / asset_name
-        else:
-            new_asset_folder = type_folder / asset_name
-
-        # Check if already in target location
-        if old_asset_folder == new_asset_folder:
-            return True, "Already in target location"
-
-        # Check for conflicts
-        if new_asset_folder.exists():
-            return False, "Target location already exists"
-
-        try:
-            # Copy files to new location
-            new_asset_folder.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(str(old_asset_folder), str(new_asset_folder))
-
-            # Update database paths
-            variant_name = asset.get('variant_name', 'Base')
-            new_variant_folder = new_asset_folder / variant_name
-            new_blend = new_variant_folder / blend_file.name
-            new_thumb = new_variant_folder / "thumbnail.png"
-
-            updates = {
-                'blend_backup_path': str(new_blend) if new_blend.exists() else None,
-                'thumbnail_path': str(new_thumb) if new_thumb.exists() else None,
-            }
-
-            self._db_service.update_asset(asset_uuid, updates)
-
-            # Delete old location
-            shutil.rmtree(str(old_asset_folder))
-
-            return True, "Moved successfully"
-
-        except Exception as e:
-            # Cleanup on failure
-            if new_asset_folder.exists():
-                try:
-                    shutil.rmtree(str(new_asset_folder), ignore_errors=True)
-                except Exception:
-                    pass
-            return False, str(e)
+            if failed_assets:
+                QMessageBox.warning(
+                    self,
+                    "Move Failed",
+                    f"Could not move assets. Check that assets match the folder type."
+                )
 
     # ==================== PUBLIC METHODS ====================
 
