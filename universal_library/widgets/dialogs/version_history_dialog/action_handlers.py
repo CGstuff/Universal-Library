@@ -1,16 +1,13 @@
 """
 Action handlers for version history dialog.
 
-Handles promote, publish, lock, cold storage, and review actions.
+Handles promote, publish, lock, cold storage actions.
 """
 
 from typing import Dict, Any, Optional, Callable, Tuple, Union
 
 from PyQt6.QtWidgets import QMessageBox, QWidget
 
-from ....config import REVIEW_CYCLE_TYPES
-from ....services.review_state_manager import get_review_state_manager
-from ....services.user_service import get_user_service
 from ....events.event_bus import get_event_bus
 
 
@@ -23,8 +20,6 @@ class VersionActionHandlers:
     - Move to/restore from cold storage
     - Publish (approve + lock)
     - Lock/unlock
-    - Review
-    - Mark final
     """
 
     def __init__(
@@ -213,64 +208,6 @@ class VersionActionHandlers:
                 self._db_service.lock_asset_version,
                 "{label} has been locked."
             )
-
-    def on_mark_final(self, populate_tree_fn: Callable[[], None]) -> bool:
-        """
-        Handle mark final action.
-
-        Args:
-            populate_tree_fn: Function to refresh tree view
-
-        Returns:
-            True if action succeeded
-        """
-        version = self._get_version()
-        if not version:
-            return False
-
-        uuid = version.get('uuid')
-        version_label = version.get('version_label', 'v001')
-
-        state_manager = get_review_state_manager()
-        cycle = state_manager.get_cycle_for_version(uuid, version_label)
-        if not cycle:
-            QMessageBox.warning(self._parent, "No Cycle", "This version is not in a review cycle.")
-            return False
-
-        cycle_type = cycle.get('cycle_type', 'general')
-        cycle_label = REVIEW_CYCLE_TYPES.get(cycle_type, {}).get('label', cycle_type.title())
-
-        reply = QMessageBox.question(
-            self._parent,
-            "Mark Cycle as Final",
-            f"Mark the {cycle_label} review cycle as Final?\n\n"
-            f"This will close the cycle at {version_label}.\n\n"
-            "Note: Final cycles cannot be reopened. To review further changes, "
-            "you will need to start a new review cycle.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-
-        if reply != QMessageBox.StandardButton.Yes:
-            return False
-
-        user_service = get_user_service()
-        current_user = user_service.get_current_username()
-
-        success, message = state_manager.mark_as_final(uuid, version_label, current_user)
-
-        if success:
-            QMessageBox.information(
-                self._parent,
-                "Cycle Finalized",
-                f"{cycle_label} review cycle has been marked as Final."
-            )
-            populate_tree_fn()
-            get_event_bus().asset_updated.emit(uuid)
-            return True
-        else:
-            QMessageBox.warning(self._parent, "Cannot Mark as Final", message)
-            return False
 
 
 __all__ = ['VersionActionHandlers']

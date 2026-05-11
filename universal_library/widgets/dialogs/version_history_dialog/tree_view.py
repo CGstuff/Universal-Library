@@ -7,15 +7,58 @@ Displays variant hierarchy with branch points.
 from typing import Dict, List, Any, Optional, Callable
 
 from PyQt6.QtWidgets import (
-    QTreeWidget, QTreeWidgetItem, QWidget, QHBoxLayout, QLabel
+    QTreeWidget, QTreeWidgetItem, QStyledItemDelegate, QStyle,
+    QStyleOptionViewItem, QApplication
 )
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush, QIcon, QPixmap
 
 from .config import VersionHistoryConfig, THUMBNAIL_UUID_ROLE
-from ....config import Config, REVIEW_CYCLE_TYPES
-from ....services.review_database import get_review_database
-from ....services.review_state_manager import get_review_state_manager
+from ....config import Config
+from ....services.version_diff import compute_version_diff
+
+
+class _DiffColorDelegate(QStyledItemDelegate):
+    """Item delegate that honors per-item foreground color even when a global
+    QSS rule (QTreeView::item { color: ... }) would otherwise override
+    QTreeWidgetItem.setForeground. Used for inline diff child rows so each row
+    can render in green/red/blue.
+
+    Default rendering is preserved for items without an explicit foreground
+    brush (i.e. all the normal variant/version rows).
+    """
+
+    def paint(self, painter, option, index):
+        brush = index.data(Qt.ItemDataRole.ForegroundRole)
+        if brush is None:
+            super().paint(painter, option, index)
+            return
+
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = opt.text
+        opt.text = ""  # we'll draw the text ourselves below
+
+        widget = opt.widget
+        style = widget.style() if widget else QApplication.style()
+        style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+
+        text_rect = style.subElementRect(
+            QStyle.SubElement.SE_ItemViewItemText, opt, widget
+        )
+        color = brush.color() if isinstance(brush, QBrush) else QColor(brush)
+
+        painter.save()
+        painter.setPen(color)
+        painter.setFont(opt.font)
+        elided = opt.fontMetrics.elidedText(
+            text, Qt.TextElideMode.ElideRight, text_rect.width()
+        )
+        align = int(opt.displayAlignment) or int(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        painter.drawText(text_rect, align, elided)
+        painter.restore()
 
 
 class VersionTreeView:
@@ -26,7 +69,7 @@ class VersionTreeView:
     - Variant hierarchy with branch points
     - Hide intermediate versions filter
     - Search filter for variants
-    - Review badges
+    - Optional inline diff rows under each version
     """
 
     def __init__(
@@ -51,6 +94,12 @@ class VersionTreeView:
         self._hide_intermediate = False
         self._search_filter = ""
         self._show_version_thumbnails = True
+        self._show_diff = False
+
+        # Install a delegate so per-item foreground colors on the inline diff
+        # rows aren't clobbered by the global QSS rule on QTreeView::item.
+        self._diff_delegate = _DiffColorDelegate(self._tree)
+        self._tree.setItemDelegate(self._diff_delegate)
 
     def set_data(self, all_variants_data: List[Dict[str, Any]]):
         """Set the variant data to display."""
@@ -67,6 +116,10 @@ class VersionTreeView:
     def set_show_thumbnails(self, show: bool):
         """Set whether to show version thumbnails."""
         self._show_version_thumbnails = show
+
+    def set_show_diff(self, show: bool):
+        """Set whether to inject inline diff child rows under each version."""
+        self._show_diff = show
 
     def populate(self):
         """Populate the tree view with variant hierarchy."""
@@ -115,9 +168,6 @@ class VersionTreeView:
 
         self._tree.expandAll()
 
-        # Deferred badge widget creation
-        QTimer.singleShot(50, self._create_deferred_badge_widgets)
-
     def _create_base_node(
         self,
         base_versions: List[Dict[str, Any]],
@@ -133,7 +183,6 @@ class VersionTreeView:
         base_node.setText(1, "")
         base_node.setText(2, "")
         base_node.setText(3, "")
-        base_node.setText(4, "")
         base_node.setData(0, Qt.ItemDataRole.UserRole, None)
         base_node.setExpanded(True)
 
@@ -171,8 +220,7 @@ class VersionTreeView:
         variant_node.setText(0, variant_name)
         variant_node.setText(1, "")
         variant_node.setText(2, "")
-        variant_node.setText(3, "")
-        variant_node.setText(4, variant_set)
+        variant_node.setText(3, variant_set)
         variant_node.setData(0, Qt.ItemDataRole.UserRole, None)
         variant_node.setForeground(0, QBrush(QColor("#7B1FA2")))
         variant_node.setExpanded(True)
@@ -240,25 +288,22 @@ class VersionTreeView:
         node.setText(2, status_info['label'])
         node.setForeground(2, QBrush(QColor(status_info['color'])))
 
-        # Review badge data
-        self._set_review_badge_data(node, version, uuid, version_label)
-
         # VariantSet (only for non-Base)
         variant_name = version.get('_variant_name', 'Base')
         if variant_name != 'Base':
-            node.setText(4, version.get('variant_set', ''))
+            node.setText(3, version.get('variant_set', ''))
 
         # Store UUID for selection
         node.setData(0, Qt.ItemDataRole.UserRole, uuid)
 
         # Highlight retired (brown/gray background, dimmed text)
         if is_retired:
-            for col in range(5):
+            for col in range(4):
                 node.setBackground(col, QBrush(QColor(121, 85, 72, 40)))  # Brown tint
                 node.setForeground(col, QBrush(QColor("#888888")))  # Gray text
         # Highlight latest (only if not retired)
         elif is_latest:
-            for col in range(5):
+            for col in range(4):
                 node.setBackground(col, QBrush(QColor(76, 175, 80, 30)))
 
         # Load thumbnail
@@ -267,137 +312,87 @@ class VersionTreeView:
             if thumb_path:
                 self._on_thumbnail_request(uuid, thumb_path, node)
 
+        # Inline diff child row (if Show Diff toggle is on)
+        if self._show_diff:
+            self._append_diff_child(node, version)
+
         return node
 
-    def _set_review_badge_data(
-        self,
-        node: QTreeWidgetItem,
-        version: Dict[str, Any],
-        uuid: str,
-        version_label: str
-    ):
-        """Set review badge data on tree node for deferred widget creation."""
-        review_db = get_review_database()
-        state_manager = get_review_state_manager()
+    # Colors for inline diff rows. Match the preview panel's Surface A palette.
+    _DIFF_COLOR_ADDED = QColor("#4CAF50")    # green
+    _DIFF_COLOR_REMOVED = QColor("#F44336")  # red
+    _DIFF_COLOR_CHANGED = QColor("#90A4AE")  # gray-blue
+    _DIFF_COLOR_DIM = QColor("#666666")      # initial / no-changes
 
-        # Use version_group_id for cycle lookup since cycles are stored with that identifier
-        version_group_id = version.get('version_group_id') or version.get('asset_id') or uuid
-        cycle = state_manager.get_cycle_for_version(version_group_id, version_label)
-        if cycle:
-            cycle_type = cycle.get('cycle_type', 'general')
-            cycle_info = REVIEW_CYCLE_TYPES.get(cycle_type, {})
-            cycle_label = cycle_info.get('label', cycle_type.title())
-            cycle_color = cycle_info.get('color', '#607D8B')
-            cycle_state = cycle.get('review_state', 'needs_review')
-            is_final = cycle_state == 'final'
-            note_counts = review_db.get_cycle_note_counts(cycle.get('id'))
-        else:
-            cycle_label = None
-            cycle_color = None
-            cycle_state = None
-            is_final = False
-            note_counts = review_db.get_note_status_counts(uuid, version_label)
+    # Max diff entries shown per version. Beyond this, last row says "+N more".
+    _DIFF_INLINE_LIMIT = 5
 
-        total_notes = note_counts.get('total', 0)
+    def _append_diff_child(self, parent_node: QTreeWidgetItem, version: Dict[str, Any]):
+        """Inject non-selectable child rows beneath the version row, one per
+        change, each colored by its change type (green/red/blue)."""
+        prev_version = self._find_previous_version(version)
+        result = compute_version_diff(prev_version, version)
 
-        if total_notes > 0 or cycle_label:
-            version_group_id = version.get('version_group_id') or version.get('asset_id') or uuid
-            node.setData(3, Qt.ItemDataRole.UserRole + 10, {
-                'open': note_counts.get('open', 0),
-                'addressed': note_counts.get('addressed', 0),
-                'approved': note_counts.get('approved', 0),
-                'cycle_label': cycle_label,
-                'cycle_color': cycle_color,
-                'cycle_state': cycle_state,
-                'is_final': is_final,
-                'uuid': uuid,
-                'version_label': version_label,
-                'version_group_id': version_group_id,
-                'cycle_id': cycle.get('id') if cycle else None
-            })
+        # Initial version or no changes — one dim row
+        if result.is_initial:
+            self._add_diff_row(parent_node, "(initial version)", self._DIFF_COLOR_DIM)
+            parent_node.setExpanded(True)
+            return
+        if not result.has_changes():
+            self._add_diff_row(parent_node, "— no changes —", self._DIFF_COLOR_DIM)
+            parent_node.setExpanded(True)
+            return
 
-    def _create_deferred_badge_widgets(self):
-        """Create badge widgets for all nodes after tree is fully built."""
-        def process_node(item: QTreeWidgetItem):
-            badge_data = item.data(3, Qt.ItemDataRole.UserRole + 10)
-            if badge_data:
-                self._create_badge_widget(item, badge_data)
+        # One row per change, colored by type, capped at _DIFF_INLINE_LIMIT
+        top = result.top_changes(self._DIFF_INLINE_LIMIT)
+        for fd in top:
+            color = {
+                'added': self._DIFF_COLOR_ADDED,
+                'removed': self._DIFF_COLOR_REMOVED,
+            }.get(fd.change_type, self._DIFF_COLOR_CHANGED)
+            self._add_diff_row(parent_node, fd.format_short(), color)
 
-            for i in range(item.childCount()):
-                process_node(item.child(i))
+        remaining = len(result.fields) - len(top)
+        if remaining > 0:
+            self._add_diff_row(
+                parent_node,
+                f"+{remaining} more change(s) — see preview",
+                self._DIFF_COLOR_DIM,
+            )
 
-        root = self._tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            process_node(root.child(i))
+        parent_node.setExpanded(True)
 
-    def _create_badge_widget(self, item: QTreeWidgetItem, badge_data: dict):
-        """Create badge widget for a tree item."""
-        open_count = badge_data.get('open', 0)
-        addressed_count = badge_data.get('addressed', 0)
-        approved_count = badge_data.get('approved', 0)
-        cycle_label = badge_data.get('cycle_label')
-        cycle_color = badge_data.get('cycle_color')
-        cycle_state = badge_data.get('cycle_state')
-        is_final = badge_data.get('is_final', False)
+    def _add_diff_row(self, parent_node: QTreeWidgetItem, text: str, color: QColor):
+        """Add one non-selectable italic child row with the given text + color."""
+        child = QTreeWidgetItem(parent_node)
+        child.setText(0, text)
+        # Non-selectable, non-focusable — purely informational
+        child.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        # Italic, slightly smaller, colored only on the text column (0).
+        # Other columns stay empty so the colored line reads as a single fragment.
+        font = child.font(0)
+        font.setItalic(True)
+        font.setPointSize(max(8, font.pointSize() - 1))
+        child.setFont(0, font)
+        child.setForeground(0, QBrush(color))
 
-        badge_widget = QWidget()
-        badge_widget.setStyleSheet("background: transparent;")
-        badge_layout = QHBoxLayout(badge_widget)
-        badge_layout.setContentsMargins(4, 0, 0, 0)
-        badge_layout.setSpacing(2)
-
-        # Cycle badge
-        if cycle_label:
-            cycle_badge = QLabel(cycle_label)
-            if is_final:
-                cycle_badge.setStyleSheet(f"""
-                    background: #333;
-                    color: {cycle_color};
-                    padding: 1px 6px;
-                    border-radius: 3px;
-                    font-size: 10px;
-                    font-weight: bold;
-                """)
-                cycle_badge.setToolTip(f"{cycle_label} cycle (Final)")
-            else:
-                cycle_badge.setStyleSheet(f"""
-                    background: {cycle_color};
-                    color: white;
-                    padding: 1px 6px;
-                    border-radius: 3px;
-                    font-size: 10px;
-                    font-weight: bold;
-                """)
-                state_labels = {
-                    'needs_review': 'Needs Review',
-                    'in_review': 'In Review',
-                    'in_progress': 'In Progress',
-                    'approved': 'Approved'
-                }
-                state_label = state_labels.get(cycle_state, cycle_state)
-                cycle_badge.setToolTip(f"{cycle_label} cycle: {state_label}")
-            badge_layout.addWidget(cycle_badge)
-            badge_layout.addSpacing(6)
-
-        def add_count_badge(count: int, color: str, tooltip: str):
-            if count > 0:
-                dot = QLabel("\u25cf")
-                dot.setStyleSheet(f"color: {color}; font-size: 10px;")
-                dot.setToolTip(tooltip)
-                badge_layout.addWidget(dot)
-
-                num_label = QLabel(str(count))
-                num_label.setStyleSheet(f"color: {color}; font-size: 11px; font-weight: bold;")
-                num_label.setToolTip(tooltip)
-                badge_layout.addWidget(num_label)
-                badge_layout.addSpacing(4)
-
-        add_count_badge(open_count, "#FF9800", f"{open_count} open (awaiting fix)")
-        add_count_badge(addressed_count, "#00BCD4", f"{addressed_count} addressed (awaiting approval)")
-        add_count_badge(approved_count, "#4CAF50", f"{approved_count} approved")
-
-        badge_layout.addStretch()
-        self._tree.setItemWidget(item, 3, badge_widget)
+    def _find_previous_version(self, version: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Find the version immediately preceding `version` in the same variant."""
+        target_variant = version.get('variant_name') or version.get('_variant_name', 'Base')
+        target_num = version.get('version', 0) or 0
+        prev = None
+        prev_num = -1
+        for v in self._all_variants_data:
+            vname = v.get('variant_name') or v.get('_variant_name', 'Base')
+            if vname != target_variant:
+                continue
+            vnum = v.get('version', 0) or 0
+            if vnum >= target_num:
+                continue
+            if vnum > prev_num:
+                prev = v
+                prev_num = vnum
+        return prev
 
     def on_thumbnail_loaded(self, uuid: str, pixmap: QPixmap):
         """Handle thumbnail loaded for tree view."""

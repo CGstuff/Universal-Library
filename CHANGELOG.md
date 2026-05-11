@@ -13,6 +13,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-05-11
+
+### Added
+
+**3D Asset Preview**
+- In-app OpenGL 4.6 viewport for previewing mesh and rig assets, with orbit camera, grid, directional lighting
+- `ThumbnailPanel` now has a 2D/3D toggle plus an "enlarge" button on the asset metadata panel
+- `EnlargedViewerDialog` — larger, resizable, non-modal viewer with its own toolbar
+- Diffuse texture rendering (decoded via `QImage`, supports PNG / JPEG / WEBP including the `EXT_texture_webp` glTF extension)
+- Multi-object scene graph traversal — node transforms preserved so multi-mesh assets render at authored positions
+- Skinned mesh rendering with linear blend skinning, up to 64 joints per rig
+- Animation playback timeline: action picker, scrubber, play/pause, loop toggle
+- Frame counter with frames-vs-seconds display toggle
+- Playback FPS picker (changes playback rate; frame count stays constant)
+- Playback speed combo (0.25× – 4×)
+- Light direction popup (azimuth + elevation sliders, persisted)
+- Background color picker in Settings → Appearance (persisted, applies live to every open viewport)
+
+**Version Diff in Lineage**
+- Per-version diff engine (`services/version_diff.py`) for poly count, materials, bones, vertex groups, textures, dimensions, etc.
+- Persistent diff section in the version history preview panel with selectable baseline
+- Optional inline diff rows under each version in the lineage tree, colored by change type
+- Per-asset-type field registry — add new fields without touching either surface
+- Pre-export warning in Blender for accidental partial re-exports (catches the "forgot to select all parts" case)
+
+**Glb Compression Pipeline**
+- WEBP texture export in place of preserved-source-format default (~5–15× smaller per texture)
+- Texture downscale to 1024² max for preview (additional ~4–16× win on 4K+ assets)
+- Draco mesh compression with `DracoPy` decoder in the in-app loader (~5–10× geometry win)
+- Combined effect: a typical 55 MB rig export now ships as ~1.3 MB
+
+**Blender Export — Animation Workflow**
+- Custom action picker dialog in the Blender export operator — pick exactly which animations belong to a rig
+- New `gltf_action_filter` user extension: bypasses Blender's "active action + NLA only" limitation for the picked set, without touching the user's NLA
+- Rig export now ships armature + bound meshes + picked animations (replaces the previous static rest-pose-only export)
+- Saved `.blend` file in the library preserves picked actions explicitly via `libraries.write` data blocks
+- Adaptive hook supports both Blender 3.x / 4.2 (`GatherActionHookParameters`) and 4.4+ (`ActionsData`) param shapes
+
+### Changed
+- Blender import (Edit / Link) now pulls all actions from the library `.blend` and marks them with `use_fake_user`, so they survive the user's working-file saves
+- `ThumbnailPanel` viewport is now constructed synchronously before main window show — GL context initializes during the initial paint pass, eliminating the mid-session flicker on first 3D click
+
+### Removed
+- Review system: review cycles, review notes, drawover canvas, screenshot attachments, user service, asset audit log
+- Studio / Pipeline mode user-management features
+- Reviewer role permissions and review state tracking
+
+### Fixed
+- `AssetRepository.delete()` no longer leaves SQLite foreign keys disabled when an exception occurs mid-delete
+- Removed dead duplicate `add()` method in `AssetRepository`
+
+
+---
+
 ## [1.1.0] - 2026-02-04
 
 ### Changed
@@ -119,6 +173,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-[Unreleased]: https://github.com/CGstuff/Universal-Library/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/CGstuff/Universal-Library/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/CGstuff/Universal-Library/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/CGstuff/Universal-Library/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/CGstuff/Universal-Library/releases/tag/v1.0.0

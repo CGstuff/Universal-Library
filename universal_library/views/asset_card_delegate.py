@@ -16,9 +16,9 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtSvg import QSvgRenderer
 
+from ..themes.fonts import Fonts
 from ..models.asset_list_model import AssetRole
 from ..services.thumbnail_loader import get_thumbnail_loader
-from ..services.user_service import get_user_service
 from ..services.control_authority import get_control_authority, OperationMode
 from ..config import Config
 
@@ -365,21 +365,6 @@ class AssetCardDelegate(QStyledItemDelegate):
         if has_tag_badge:
             self._draw_tag_count(painter, thumbnail_rect, tag_count, is_cold)
 
-        # Draw review state badge or comment badge (only in Studio/Pipeline mode)
-        control_authority = get_control_authority()
-        if control_authority.get_operation_mode() != OperationMode.STANDALONE:
-            review_state = index.data(AssetRole.ReviewStateRole)
-            unresolved_count = index.data(AssetRole.UnresolvedCommentCountRole) or 0
-
-            if review_state:
-                # Asset is in review workflow - show review state badge
-                self._draw_review_state_badge(painter, thumbnail_rect, review_state,
-                                              unresolved_count, is_cold, has_tag_badge, tag_count)
-            elif unresolved_count > 0:
-                # Legacy: assets not in review workflow but have comments
-                self._draw_comment_badge(painter, thumbnail_rect, unresolved_count,
-                                         is_cold, has_tag_badge, tag_count)
-
         # Draw text below thumbnail
         name_height = 28
         text_rect = QRect(rect.x(), rect.y() + self._card_size, self._card_size, name_height)
@@ -562,7 +547,7 @@ class AssetCardDelegate(QStyledItemDelegate):
         badge_text = self.STATUS_LABELS.get(status.lower(), status.upper()[:3])
         badge_color = QColor(self.STATUS_COLORS.get(status.lower(), '#9E9E9E'))
 
-        font = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 8, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
         text_width = fm.horizontalAdvance(badge_text)
@@ -593,7 +578,7 @@ class AssetCardDelegate(QStyledItemDelegate):
         badge_text = self.REP_TYPE_LABELS.get(rep_type.lower(), rep_type.upper()[:3])
         badge_color = QColor(self.REP_TYPE_COLORS.get(rep_type.lower(), '#607D8B'))
 
-        font = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 8, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
         text_width = fm.horizontalAdvance(badge_text)
@@ -621,7 +606,7 @@ class AssetCardDelegate(QStyledItemDelegate):
     def _draw_version_badge(self, painter: QPainter, thumbnail_rect: QRect, version_label: str):
         """Draw version label badge (bottom-right corner)"""
 
-        font = QFont("Segoe UI", 7, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 9, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
         text_width = fm.horizontalAdvance(version_label)
@@ -650,7 +635,7 @@ class AssetCardDelegate(QStyledItemDelegate):
     def _draw_variant_badge(self, painter: QPainter, thumbnail_rect: QRect, variant_name: str):
         """Draw variant indicator badge (above version badge, bottom-right)"""
 
-        font = QFont("Segoe UI", 7, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 9, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
 
@@ -682,7 +667,7 @@ class AssetCardDelegate(QStyledItemDelegate):
     def _draw_variant_count_badge(self, painter: QPainter, thumbnail_rect: QRect, count: int):
         """Draw variant count badge for Base assets (above version badge, bottom-right)"""
 
-        font = QFont("Segoe UI", 7, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 9, QFont.Weight.Bold)
         painter.setFont(font)
         fm = QFontMetrics(font)
 
@@ -715,7 +700,7 @@ class AssetCardDelegate(QStyledItemDelegate):
         """Draw cold storage indicator (snowflake-like icon in top-left)"""
 
         # Draw a blue "COLD" indicator
-        font = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 8, QFont.Weight.Bold)
         painter.setFont(font)
 
         badge_text = "COLD"
@@ -746,7 +731,7 @@ class AssetCardDelegate(QStyledItemDelegate):
     def _draw_tag_count(self, painter: QPainter, thumbnail_rect: QRect, count: int, has_cold_badge: bool):
         """Draw tag count indicator (small number badge)"""
 
-        font = QFont("Segoe UI", 7, QFont.Weight.Bold)
+        font = QFont(Fonts.SHOT_CARD_BADGE.family, 9, QFont.Weight.Bold)
         painter.setFont(font)
 
         badge_text = str(count)
@@ -792,121 +777,6 @@ class AssetCardDelegate(QStyledItemDelegate):
                 self._svg_cache['info_icon'] = renderer
                 return renderer
         return None
-
-    def _draw_comment_badge(self, painter: QPainter, thumbnail_rect: QRect, count: int,
-                            has_cold_badge: bool, has_tag_badge: bool, tag_count: int = 0):
-        """Draw comment count indicator badge (for unresolved review comments)"""
-
-        if count <= 0:
-            return
-
-        # Icon and text sizing
-        icon_size = 18
-        font = QFont("Segoe UI", 10, QFont.Weight.Bold)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-
-        # Calculate dimensions
-        count_text = str(count)
-        text_width = fm.horizontalAdvance(count_text)
-        total_width = icon_size + 2 + text_width  # icon + gap + text
-
-        # Position: top-left, after other badges (checkbox, COLD, tags)
-        x_offset = 4
-        if self._edit_mode:
-            x_offset += 26
-        if has_cold_badge:
-            x_offset += 38  # After COLD badge
-        if has_tag_badge:
-            # Calculate tag badge width
-            tag_text = f"#{tag_count}"
-            tag_width = max(14, fm.horizontalAdvance(tag_text) + 6)
-            x_offset += tag_width + 4  # After tag badge + spacing
-
-        # Draw info icon
-        renderer = self._get_info_icon_renderer()
-        if renderer:
-            icon_rect = QRectF(
-                thumbnail_rect.x() + x_offset,
-                thumbnail_rect.y() + 4,
-                icon_size,
-                icon_size
-            )
-            renderer.render(painter, icon_rect)
-
-        # Draw count text (white with slight shadow for visibility)
-        text_x = thumbnail_rect.x() + x_offset + icon_size + 2
-        text_y = thumbnail_rect.y() + 4 + (icon_size + fm.ascent()) // 2 - 2
-
-        # Shadow for readability
-        painter.setPen(QColor(0, 0, 0, 180))
-        painter.drawText(int(text_x + 1), int(text_y + 1), count_text)
-
-        # Main text
-        painter.setPen(QColor("#FFFFFF"))
-        painter.drawText(int(text_x), int(text_y), count_text)
-
-    def _draw_review_state_badge(self, painter: QPainter, thumbnail_rect: QRect,
-                                  review_state: str, comment_count: int,
-                                  has_cold_badge: bool, has_tag_badge: bool, tag_count: int = 0):
-        """
-        Draw review workflow state badge.
-
-        Shows different colored badges based on review state:
-        - needs_review: Blue badge with "REV" (waiting for lead)
-        - in_review: Orange badge with "REV" + comment count
-        - in_progress: Cyan badge with "WIP" (artist working on fixes)
-        - approved: Green badge with "OK"
-        - final: Purple badge with "FNL"
-        """
-        # Get badge config from Config.REVIEW_STATES
-        state_config = Config.REVIEW_STATES.get(review_state)
-        if not state_config or not state_config.get('color'):
-            return
-
-        badge_color = state_config['color']
-        badge_text = state_config.get('badge', 'REV')
-
-        # For in_review, append comment count
-        if review_state == 'in_review' and comment_count > 0:
-            badge_text = f"{badge_text}:{comment_count}"
-
-        # Font for badge text
-        font = QFont("Segoe UI", 9, QFont.Weight.Bold)
-        painter.setFont(font)
-        fm = QFontMetrics(font)
-
-        # Calculate badge dimensions
-        text_width = fm.horizontalAdvance(badge_text)
-        badge_width = max(text_width + 8, 28)  # Min width 28px
-        badge_height = 16
-
-        # Position: top-left, after other badges (checkbox, COLD, tags)
-        x_offset = 4
-        if self._edit_mode:
-            x_offset += 26
-        if has_cold_badge:
-            x_offset += 38  # After COLD badge
-        if has_tag_badge:
-            # Calculate tag badge width
-            tag_text = f"#{tag_count}"
-            tag_width = max(14, fm.horizontalAdvance(tag_text) + 6)
-            x_offset += tag_width + 4  # After tag badge + spacing
-
-        badge_x = thumbnail_rect.x() + x_offset
-        badge_y = thumbnail_rect.y() + 4
-
-        # Draw badge background (rounded rectangle)
-        badge_rect = QRectF(badge_x, badge_y, badge_width, badge_height)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(badge_color))
-        painter.drawRoundedRect(badge_rect, 3, 3)
-
-        # Draw badge text (white, centered)
-        painter.setPen(QColor("#FFFFFF"))
-        text_x = badge_x + (badge_width - text_width) / 2
-        text_y = badge_y + (badge_height + fm.ascent() - fm.descent()) / 2 - 1
-        painter.drawText(int(text_x), int(text_y), badge_text)
 
     def _draw_checkbox(self, painter: QPainter, rect: QRect, is_checked: bool):
         """Draw edit mode checkbox"""
@@ -975,7 +845,7 @@ class AssetCardDelegate(QStyledItemDelegate):
             painter.fillRect(rect, bg_color)
 
         # Font
-        font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
+        font = QFont(Fonts.SHOT_CARD_NAME.family, Fonts.SHOT_CARD_NAME.size, QFont.Weight.DemiBold)
         painter.setFont(font)
 
         # Color
@@ -1015,7 +885,7 @@ class AssetCardDelegate(QStyledItemDelegate):
             icon_x += icon_size + 6
 
         # Name (bold)
-        font_bold = QFont("Segoe UI", 10)
+        font_bold = QFont(Fonts.HEADER_SMALL.family, Fonts.HEADER_SMALL.size)
         font_bold.setBold(True)
         painter.setFont(font_bold)
 
@@ -1031,7 +901,7 @@ class AssetCardDelegate(QStyledItemDelegate):
 
         # Draw inline badges next to name
         badge_x = icon_x + fm.horizontalAdvance(elided_name) + 8
-        font_badge = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        font_badge = QFont(Fonts.SHOT_CARD_BADGE.family, 8, QFont.Weight.Bold)
         painter.setFont(font_badge)
         badge_fm = QFontMetrics(font_badge)
 
@@ -1069,7 +939,7 @@ class AssetCardDelegate(QStyledItemDelegate):
             painter.drawText(rep_rect, Qt.AlignmentFlag.AlignCenter, rep_text)
 
         # Metadata (smaller)
-        font_small = QFont("Segoe UI", 8)
+        font_small = QFont(Fonts.SHOT_CARD_DURATION.family, Fonts.SHOT_CARD_DURATION.size)
         painter.setFont(font_small)
 
         if is_selected:

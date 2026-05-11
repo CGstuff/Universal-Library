@@ -15,6 +15,10 @@ from PyQt6.QtCore import Qt, QSettings
 
 from ...config import Config
 from ...themes import get_theme_manager
+from ...services.viewport_settings import (
+    get_viewport_bg_color, set_viewport_bg_color, default_bg_hex,
+)
+from .color_picker_row import ColorPickerRow
 
 
 class AppearanceTab(QWidget):
@@ -185,6 +189,26 @@ class AppearanceTab(QWidget):
         perf_layout.addLayout(thread_row)
 
         layout.addWidget(perf_group)
+
+        # 3D Preview Group
+        preview_group = QGroupBox("3D Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        current_bg = get_viewport_bg_color().name()
+        self._bg_picker = ColorPickerRow("Background Color", current_bg)
+        # Reset baseline so the row's "Reset" button restores the design default
+        # rather than whatever the user previously had.
+        self._bg_picker.original_color = default_bg_hex().upper()
+        self._bg_picker.color_changed.connect(self._on_3d_bg_changed)
+        preview_layout.addWidget(self._bg_picker)
+
+        preview_note = QLabel(
+            "Applies live to all open 3D preview viewports."
+        )
+        preview_note.setStyleSheet("color: #808080; font-style: italic;")
+        preview_layout.addWidget(preview_note)
+
+        layout.addWidget(preview_group)
 
         layout.addStretch()
 
@@ -378,6 +402,13 @@ class AppearanceTab(QWidget):
         """Handle card size slider change"""
         self._size_value.setText(f"{value}px")
 
+    def _on_3d_bg_changed(self, hex_color: str):
+        """Apply 3D preview BG color live (and persist via the service)."""
+        from PyQt6.QtGui import QColor
+        c = QColor(hex_color)
+        if c.isValid():
+            set_viewport_bg_color(c)
+
     def _load_settings(self):
         """Load settings from QSettings"""
         settings = QSettings(Config.APP_AUTHOR, Config.APP_NAME)
@@ -408,6 +439,10 @@ class AppearanceTab(QWidget):
         # Performance
         threads = settings.value("performance/thumbnail_threads", Config.THUMBNAIL_THREAD_COUNT, type=int)
         self._thread_spin.setValue(threads)
+
+        # 3D Preview background — pull through the service so the picker shows
+        # whatever is persisted right now (in case it was changed elsewhere).
+        self._bg_picker.set_color(get_viewport_bg_color().name(), emit_signal=False)
 
     def save_settings(self):
         """Save settings to QSettings"""

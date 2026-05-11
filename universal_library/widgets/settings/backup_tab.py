@@ -20,7 +20,6 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from ...config import Config
 from ...services.backup_service import BackupService
 from ...services.database_service import get_database_service
-from ...services.review_database import get_review_database
 
 
 class ExportWorker(QThread):
@@ -331,12 +330,6 @@ class BackupTab(QWidget):
         try:
             db_service = get_database_service()
             db_service.close()
-        except Exception:
-            pass
-
-        try:
-            review_db = get_review_database()
-            review_db.close()
         except Exception:
             pass
 

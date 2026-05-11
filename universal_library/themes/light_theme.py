@@ -6,6 +6,7 @@ Based on animation_library architecture.
 """
 
 from .theme_manager import Theme, ColorPalette
+from .fonts import Fonts
 
 
 class LightTheme(Theme):
@@ -70,8 +71,7 @@ class LightTheme(Theme):
 QWidget {{
     background-color: {p.background};
     color: {p.text_primary};
-    font-family: "Segoe UI", Arial, sans-serif;
-    font-size: 13px;
+    font-family: "{Fonts.DEFAULT.family}", Arial, sans-serif;`n    font-size: {Fonts.DEFAULT.size}px;
 }}
 
 QMainWindow {{

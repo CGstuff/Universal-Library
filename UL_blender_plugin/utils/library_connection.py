@@ -467,6 +467,41 @@ class LibraryConnection:
         except Exception as e:
             return False
 
+    def copy_tags_to_asset(self, source_uuid: str, target_uuid: str) -> bool:
+        """
+        Copy tag assignments from one asset to another.
+
+        Used when creating new versions/variants to inherit tags.
+
+        Args:
+            source_uuid: Source asset UUID (e.g., v001)
+            target_uuid: Target asset UUID (e.g., v002)
+
+        Returns:
+            True if successful
+        """
+        if not self._connection:
+            self.connect()
+
+        try:
+            cursor = self._connection.cursor()
+
+            cursor.execute('''
+                SELECT tag_id FROM asset_tags WHERE asset_uuid = ?
+            ''', (source_uuid,))
+            tag_ids = [row[0] for row in cursor.fetchall()]
+
+            for tag_id in tag_ids:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO asset_tags (asset_uuid, tag_id, created_date)
+                    VALUES (?, ?, ?)
+                ''', (target_uuid, tag_id, datetime.now()))
+
+            self._connection.commit()
+            return True
+        except Exception:
+            return False
+
     def delete_asset(self, asset_uuid: str) -> bool:
         """Delete asset from library"""
         if not self._connection:

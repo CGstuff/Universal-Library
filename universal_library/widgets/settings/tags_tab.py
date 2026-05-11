@@ -1,14 +1,15 @@
 """
-TagsTab - Tag management settings tab
+TagsTab - Hierarchical tag management settings tab.
 
-Pattern: QWidget tab for settings dialog
-Provides CRUD operations for tags.
+Tree view for browsing/editing the tag hierarchy.
+Supports creating tags via dot-separated paths, adding children,
+renaming, recoloring, and deleting.
 """
 
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QTreeWidget, QTreeWidgetItem,
     QPushButton, QLineEdit, QLabel, QGroupBox, QColorDialog,
-    QMessageBox, QInputDialog
+    QMessageBox, QInputDialog, QHeaderView
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QColor, QIcon, QPixmap
@@ -19,58 +20,66 @@ from ...services.tag_repository import TagRepository
 
 class TagsTab(QWidget):
     """
-    Tag management tab for settings dialog
+    Hierarchical tag management tab for settings dialog.
 
     Features:
-    - View all tags with colors and usage counts
-    - Create new tags
-    - Edit tag names and colors
-    - Delete tags (with confirmation)
+    - Tree view of tag hierarchy
+    - Create tags via dot-separated path (auto-creates parents)
+    - Add child tags on selected parent
+    - Edit tag name and color
+    - Delete tag and descendants
+    - Usage counts per tag
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-
         self._db_service = get_database_service()
-
         self._create_ui()
         self._load_tags()
 
     def _create_ui(self):
-        """Create UI layout"""
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
         # Header
-        header_label = QLabel("Manage Tags")
-        header_label.setStyleSheet("font-size: 14px; font-weight: bold;")
-        layout.addWidget(header_label)
+        header = QLabel("Manage Tags")
+        header.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(header)
 
-        desc_label = QLabel(
-            "Create, edit, and delete tags used to organize your assets."
+        desc = QLabel(
+            "Tags are hierarchical (e.g. Vegetation.Tree.Oak). "
+            "Type a dot-separated path to auto-create the full chain."
         )
-        desc_label.setStyleSheet("color: #808080;")
-        desc_label.setWordWrap(True)
-        layout.addWidget(desc_label)
+        desc.setStyleSheet("color: #808080;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
 
-        # Tags list
-        list_group = QGroupBox("Tags")
-        list_layout = QVBoxLayout(list_group)
+        # Tree view
+        tree_group = QGroupBox("Tag Hierarchy")
+        tree_layout = QVBoxLayout(tree_group)
 
-        self._tag_list = QListWidget()
-        self._tag_list.setIconSize(QSize(16, 16))
-        self._tag_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self._tag_list.itemDoubleClicked.connect(self._on_edit_tag)
-        list_layout.addWidget(self._tag_list)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Tag", "Assets", "Path"])
+        self._tree.setColumnCount(3)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        self._tree.setExpandsOnDoubleClick(False)
+        self._tree.itemDoubleClicked.connect(self._on_edit_tag)
 
-        layout.addWidget(list_group, 1)
+        header_view = self._tree.header()
+        header_view.setStretchLastSection(True)
+        header_view.resizeSection(0, 200)
+        header_view.resizeSection(1, 60)
+
+        tree_layout.addWidget(self._tree)
+        layout.addWidget(tree_group, 1)
 
         # Add new tag section
-        add_group = QGroupBox("Add New Tag")
+        add_group = QGroupBox("Add Tag")
         add_layout = QHBoxLayout(add_group)
 
         self._new_tag_input = QLineEdit()
-        self._new_tag_input.setPlaceholderText("Enter tag name...")
+        self._new_tag_input.setPlaceholderText("e.g. Vegetation.Tree.Oak or just Oak")
         self._new_tag_input.returnPressed.connect(self._on_add_tag)
 
         self._color_btn = QPushButton()
@@ -86,31 +95,33 @@ class TagsTab(QWidget):
         add_layout.addWidget(self._new_tag_input, 1)
         add_layout.addWidget(self._color_btn)
         add_layout.addWidget(self._add_btn)
-
         layout.addWidget(add_group)
 
         # Action buttons
-        actions_layout = QHBoxLayout()
+        actions = QHBoxLayout()
 
-        self._edit_btn = QPushButton("Edit Selected")
+        self._add_child_btn = QPushButton("Add Child")
+        self._add_child_btn.setToolTip("Add a child tag under selected")
+        self._add_child_btn.clicked.connect(self._on_add_child)
+
+        self._edit_btn = QPushButton("Edit")
         self._edit_btn.clicked.connect(self._on_edit_selected)
 
-        self._delete_btn = QPushButton("Delete Selected")
-        self._delete_btn.clicked.connect(self._on_delete_selected)
+        self._delete_btn = QPushButton("Delete")
         self._delete_btn.setStyleSheet("color: #c0392b;")
+        self._delete_btn.clicked.connect(self._on_delete_selected)
 
         self._refresh_btn = QPushButton("Refresh")
         self._refresh_btn.clicked.connect(self._load_tags)
 
-        actions_layout.addWidget(self._edit_btn)
-        actions_layout.addWidget(self._delete_btn)
-        actions_layout.addStretch()
-        actions_layout.addWidget(self._refresh_btn)
-
-        layout.addLayout(actions_layout)
+        actions.addWidget(self._add_child_btn)
+        actions.addWidget(self._edit_btn)
+        actions.addWidget(self._delete_btn)
+        actions.addStretch()
+        actions.addWidget(self._refresh_btn)
+        layout.addLayout(actions)
 
     def _update_color_button(self):
-        """Update the color button appearance"""
         pixmap = QPixmap(24, 24)
         pixmap.fill(QColor(self._current_color))
         self._color_btn.setIcon(QIcon(pixmap))
@@ -122,145 +133,148 @@ class TagsTab(QWidget):
             }}
         """)
 
+    def _make_color_icon(self, color: str) -> QIcon:
+        pixmap = QPixmap(16, 16)
+        pixmap.fill(QColor(color))
+        return QIcon(pixmap)
+
     def _load_tags(self):
-        """Load tags from database"""
-        self._tag_list.clear()
+        self._tree.clear()
+        usage = self._db_service.get_tags_with_counts()
+        count_map = {t['id']: t.get('count', 0) for t in usage}
 
-        tags = self._db_service.get_tags_with_counts()
+        tree_data = self._db_service.get_tag_tree()
+        if not tree_data:
+            placeholder = QTreeWidgetItem(self._tree, ["No tags yet"])
+            placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+            placeholder.setForeground(0, QColor("#808080"))
+            return
 
-        for tag in tags:
-            tag_id = tag.get('id')
-            tag_name = tag.get('name', 'Unknown')
-            tag_color = tag.get('color', '#607D8B')
-            count = tag.get('count', 0)
+        def populate(parent_widget, nodes):
+            for node in nodes:
+                count = count_map.get(node['id'], 0)
+                item = QTreeWidgetItem(parent_widget, [
+                    node['name'],
+                    str(count) if count > 0 else "",
+                    node.get('full_path', node['name'])
+                ])
+                item.setData(0, Qt.ItemDataRole.UserRole, node['id'])
+                item.setData(0, Qt.ItemDataRole.UserRole + 1, node.get('color', '#607D8B'))
+                item.setIcon(0, self._make_color_icon(node.get('color', '#607D8B')))
 
-            item = QListWidgetItem(f"{tag_name} ({count} assets)")
-            item.setData(Qt.ItemDataRole.UserRole, tag_id)
-            item.setData(Qt.ItemDataRole.UserRole + 1, tag_name)
-            item.setData(Qt.ItemDataRole.UserRole + 2, tag_color)
+                if node.get('children'):
+                    populate(item, node['children'])
 
-            # Create color icon
-            pixmap = QPixmap(16, 16)
-            pixmap.fill(QColor(tag_color))
-            item.setIcon(QIcon(pixmap))
-
-            self._tag_list.addItem(item)
-
-        if not tags:
-            item = QListWidgetItem("No tags yet. Create one above.")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            item.setForeground(QColor("#808080"))
-            self._tag_list.addItem(item)
+        populate(self._tree, tree_data)
+        self._tree.expandAll()
 
     def _on_choose_color(self):
-        """Open color picker for new tag"""
-        color = QColorDialog.getColor(
-            QColor(self._current_color),
-            self,
-            "Choose Tag Color"
-        )
+        color = QColorDialog.getColor(QColor(self._current_color), self, "Choose Tag Color")
         if color.isValid():
             self._current_color = color.name()
             self._update_color_button()
 
     def _on_add_tag(self):
-        """Add a new tag"""
-        name = self._new_tag_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Invalid Name", "Please enter a tag name.")
+        text = self._new_tag_input.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Invalid", "Please enter a tag name or path.")
             return
 
-        # Check if tag already exists
-        existing = self._db_service.get_tag_by_name(name)
+        # Check if path already exists
+        existing = self._db_service.get_tag_by_path(text)
         if existing:
-            QMessageBox.warning(
-                self, "Tag Exists",
-                f"A tag named '{name}' already exists."
-            )
+            QMessageBox.warning(self, "Exists", f"Tag '{text}' already exists.")
             return
 
-        # Create the tag
-        tag_id = self._db_service.create_tag(name, self._current_color)
+        tag_id = self._db_service.create_tag_from_path(text, self._current_color)
         if tag_id:
             self._new_tag_input.clear()
             self._load_tags()
-            # Cycle to next color from palette
             self._cycle_color()
         else:
             QMessageBox.critical(self, "Error", "Failed to create tag.")
 
-    def _cycle_color(self):
-        """Cycle to next default color"""
-        colors = TagRepository.DEFAULT_COLORS
-        try:
-            idx = colors.index(self._current_color)
-            self._current_color = colors[(idx + 1) % len(colors)]
-        except ValueError:
-            self._current_color = colors[0]
-        self._update_color_button()
+    def _on_add_child(self):
+        item = self._tree.currentItem()
+        if not item or item.data(0, Qt.ItemDataRole.UserRole) is None:
+            QMessageBox.information(self, "No Selection", "Select a parent tag first.")
+            return
+
+        parent_id = item.data(0, Qt.ItemDataRole.UserRole)
+        parent_path = item.text(2)
+
+        name, ok = QInputDialog.getText(
+            self, "Add Child Tag",
+            f"New child tag under '{parent_path}':"
+        )
+        if not ok or not name.strip():
+            return
+
+        name = name.strip()
+        # If they typed dots, create the sub-chain
+        if '.' in name:
+            full_path = f"{parent_path}.{name}"
+            tag_id = self._db_service.create_tag_from_path(full_path, self._current_color)
+        else:
+            tag_id = self._db_service.create_tag(name, self._current_color, parent_id)
+
+        if tag_id:
+            self._load_tags()
+            self._cycle_color()
+        else:
+            QMessageBox.critical(self, "Error", "Failed to create child tag.")
 
     def _on_edit_selected(self):
-        """Edit the selected tag"""
-        item = self._tag_list.currentItem()
-        if not item or not item.data(Qt.ItemDataRole.UserRole):
-            QMessageBox.information(self, "No Selection", "Please select a tag to edit.")
+        item = self._tree.currentItem()
+        if not item or item.data(0, Qt.ItemDataRole.UserRole) is None:
+            QMessageBox.information(self, "No Selection", "Select a tag to edit.")
             return
-        self._on_edit_tag(item)
+        self._on_edit_tag(item, 0)
 
-    def _on_edit_tag(self, item: QListWidgetItem):
-        """Edit a tag (name and color)"""
-        tag_id = item.data(Qt.ItemDataRole.UserRole)
-        tag_name = item.data(Qt.ItemDataRole.UserRole + 1)
-        tag_color = item.data(Qt.ItemDataRole.UserRole + 2)
-
-        if not tag_id:
+    def _on_edit_tag(self, item: QTreeWidgetItem, column: int = 0):
+        tag_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if tag_id is None:
             return
 
-        # Ask for new name
+        tag_name = item.text(0)
+        tag_color = item.data(0, Qt.ItemDataRole.UserRole + 1) or '#607D8B'
+
         new_name, ok = QInputDialog.getText(
-            self, "Edit Tag",
-            "Enter new tag name:",
-            text=tag_name
+            self, "Edit Tag", "Tag name (leaf only, not full path):", text=tag_name
         )
-
         if not ok:
             return
 
         new_name = new_name.strip()
         if not new_name:
-            QMessageBox.warning(self, "Invalid Name", "Tag name cannot be empty.")
+            QMessageBox.warning(self, "Invalid", "Tag name cannot be empty.")
             return
 
-        # Ask for new color
-        color = QColorDialog.getColor(
-            QColor(tag_color),
-            self,
-            f"Choose color for '{new_name}'"
-        )
-
+        color = QColorDialog.getColor(QColor(tag_color), self, f"Color for '{new_name}'")
         new_color = color.name() if color.isValid() else tag_color
 
-        # Update the tag
         if self._db_service.update_tag(tag_id, name=new_name, color=new_color):
             self._load_tags()
         else:
             QMessageBox.critical(self, "Error", "Failed to update tag.")
 
     def _on_delete_selected(self):
-        """Delete the selected tag"""
-        item = self._tag_list.currentItem()
-        if not item or not item.data(Qt.ItemDataRole.UserRole):
-            QMessageBox.information(self, "No Selection", "Please select a tag to delete.")
+        item = self._tree.currentItem()
+        if not item or item.data(0, Qt.ItemDataRole.UserRole) is None:
+            QMessageBox.information(self, "No Selection", "Select a tag to delete.")
             return
 
-        tag_id = item.data(Qt.ItemDataRole.UserRole)
-        tag_name = item.data(Qt.ItemDataRole.UserRole + 1)
+        tag_id = item.data(0, Qt.ItemDataRole.UserRole)
+        tag_path = item.text(2)
+        has_children = item.childCount() > 0
 
-        # Confirm deletion
+        msg = f"Delete tag '{tag_path}'?"
+        if has_children:
+            msg += "\n\nThis will also delete all child tags."
+        msg += "\n\nThe tag will be removed from all assets."
+
         reply = QMessageBox.question(
-            self, "Delete Tag",
-            f"Are you sure you want to delete the tag '{tag_name}'?\n\n"
-            "This will remove the tag from all assets.",
+            self, "Delete Tag", msg,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -271,8 +285,17 @@ class TagsTab(QWidget):
             else:
                 QMessageBox.critical(self, "Error", "Failed to delete tag.")
 
+    def _cycle_color(self):
+        colors = TagRepository.DEFAULT_COLORS
+        try:
+            idx = colors.index(self._current_color)
+            self._current_color = colors[(idx + 1) % len(colors)]
+        except ValueError:
+            self._current_color = colors[0]
+        self._update_color_button()
+
     def save_settings(self):
-        """Save settings (no-op for tags - saved immediately)"""
+        """No-op — tags are saved immediately."""
         pass
 
 

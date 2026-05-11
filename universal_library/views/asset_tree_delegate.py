@@ -12,6 +12,7 @@ from PyQt6.QtCore import QSize, QRect, Qt, QRectF
 from PyQt6.QtGui import (
     QPainter, QFont, QColor, QFontMetrics, QBrush, QPen
 )
+from ..themes.fonts import Fonts
 from PyQt6.QtSvg import QSvgRenderer
 
 from ..models.asset_tree_model import TREE_ASSET_ROLE, TREE_IS_PARENT
@@ -156,7 +157,7 @@ class AssetTreeDelegate(QStyledItemDelegate):
 
         # Draw name (bold, first line)
         name = asset.get('name', 'Unknown')
-        font_bold = QFont("Segoe UI", 10)
+        font_bold = QFont(Fonts.HEADER_SMALL.family, Fonts.HEADER_SMALL.size)
         font_bold.setBold(True)
         painter.setFont(font_bold)
         fm = QFontMetrics(font_bold)
@@ -179,7 +180,7 @@ class AssetTreeDelegate(QStyledItemDelegate):
 
         # Inline badges next to name
         badge_x = name_x + fm.horizontalAdvance(elided) + 8
-        badge_font = QFont("Segoe UI", 6, QFont.Weight.Bold)
+        badge_font = QFont(Fonts.SHOT_CARD_BADGE.family, 8, QFont.Weight.Bold)
         painter.setFont(badge_font)
         badge_fm = QFontMetrics(badge_font)
 
@@ -217,7 +218,7 @@ class AssetTreeDelegate(QStyledItemDelegate):
                 badge_x += vw + 4
 
         # Second line: metadata
-        meta_font = QFont("Segoe UI", 8)
+        meta_font = QFont(Fonts.SHOT_CARD_DURATION.family, Fonts.SHOT_CARD_DURATION.size)
         painter.setFont(meta_font)
         meta_color = QColor('#ffffff') if is_selected else QColor(COLORS['text_secondary'])
         painter.setPen(meta_color)
@@ -248,7 +249,7 @@ class AssetTreeDelegate(QStyledItemDelegate):
         if not thumbnail_path:
             painter.fillRect(rect, QColor(COLORS['background_secondary']))
             painter.setPen(QColor("#808080"))
-            f = QFont("Segoe UI", 7)
+            f = QFont(Fonts.CAPTION.family, Fonts.CAPTION.size)
             painter.setFont(f)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No Image")
             return
@@ -272,7 +273,7 @@ class AssetTreeDelegate(QStyledItemDelegate):
         else:
             painter.fillRect(rect, QColor(COLORS['background_secondary']))
             painter.setPen(QColor("#A0A0A0"))
-            f = QFont("Segoe UI", 7)
+            f = QFont(Fonts.CAPTION.family, Fonts.CAPTION.size)
             painter.setFont(f)
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "Loading...")
 

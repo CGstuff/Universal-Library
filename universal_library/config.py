@@ -583,11 +583,6 @@ class Config:
     VIRTUAL_FOLDER_COLD_STORAGE = -4
     VIRTUAL_FOLDER_BASE = -5
     VIRTUAL_FOLDER_VARIANTS = -6
-    VIRTUAL_FOLDER_NEEDS_REVIEW = -7
-    VIRTUAL_FOLDER_IN_REVIEW = -8
-    VIRTUAL_FOLDER_IN_PROGRESS = -9
-    VIRTUAL_FOLDER_APPROVED = -10
-    VIRTUAL_FOLDER_FINAL = -11
 
     VIRTUAL_FOLDERS = {
         VIRTUAL_FOLDER_ALL: "All Assets",
@@ -596,21 +591,7 @@ class Config:
         VIRTUAL_FOLDER_FAVORITES: "Favorites",
         VIRTUAL_FOLDER_RECENT: "Recent",
         VIRTUAL_FOLDER_COLD_STORAGE: "Cold Storage",
-        VIRTUAL_FOLDER_NEEDS_REVIEW: "Needs Review",
-        VIRTUAL_FOLDER_IN_REVIEW: "In Review",
-        VIRTUAL_FOLDER_IN_PROGRESS: "In Progress",
-        VIRTUAL_FOLDER_APPROVED: "Approved",
-        VIRTUAL_FOLDER_FINAL: "Final",
     }
-
-    # Review workflow virtual folder IDs (for grouping in folder tree)
-    REVIEW_VIRTUAL_FOLDERS = [
-        VIRTUAL_FOLDER_NEEDS_REVIEW,
-        VIRTUAL_FOLDER_IN_REVIEW,
-        VIRTUAL_FOLDER_IN_PROGRESS,
-        VIRTUAL_FOLDER_APPROVED,
-        VIRTUAL_FOLDER_FINAL,
-    ]
 
     # ==================== REPRESENTATION TYPES ====================
     REPRESENTATION_TYPES = {
@@ -636,44 +617,5 @@ class Config:
         'archived': {'color': '#9E9E9E', 'label': 'Archived'},
     }
 
-    # ==================== REVIEW WORKFLOW STATES ====================
-    # Review state is separate from lifecycle status
-    # - Lifecycle status = content maturity (WIP, Review, Approved)
-    # - Review state = review workflow stage (Needs Review, In Review, Approved, Final)
-    REVIEW_STATES = {
-        None: {'color': None, 'label': None, 'badge': None},  # Not in review workflow
-        'needs_review': {'color': '#2196F3', 'label': 'Needs Review', 'badge': 'REV'},  # Blue - awaiting lead
-        'in_review': {'color': '#FF9800', 'label': 'In Review', 'badge': 'REV'},  # Orange - lead commented
-        'in_progress': {'color': '#00BCD4', 'label': 'In Progress', 'badge': 'WIP'},  # Cyan - artist working on fixes
-        'approved': {'color': '#4CAF50', 'label': 'Approved', 'badge': 'OK'},  # Green - all approved by lead
-        'final': {'color': '#9C27B0', 'label': 'Final', 'badge': 'FNL'},  # Purple - review complete
-    }
 
-    # Note status constants (3-state workflow)
-    NOTE_STATUSES = {
-        'open': {'color': '#FF9800', 'label': 'Open', 'icon': 'comment'},  # Lead added, awaiting artist
-        'addressed': {'color': '#00BCD4', 'label': 'Addressed', 'icon': 'check'},  # Artist fixed, awaiting lead
-        'approved': {'color': '#4CAF50', 'label': 'Approved', 'icon': 'approve'},  # Lead approved
-    }
-
-    # User roles for review workflow
-    # Elevated roles can trigger state transitions and mark as final
-    ELEVATED_ROLES = ['lead', 'supervisor', 'admin', 'director']
-
-
-# Review cycle types (presets only - no free-form to prevent inconsistency)
-# Each review cycle spans multiple versions for a specific phase
-# Moved outside Config class for easy module-level import
-REVIEW_CYCLE_TYPES = {
-    'modeling': {'label': 'Modeling', 'color': '#2196F3'},      # Blue
-    'texturing': {'label': 'Texturing', 'color': '#FF9800'},    # Orange
-    'rigging': {'label': 'Rigging', 'color': '#9C27B0'},        # Purple
-    'lighting': {'label': 'Lighting', 'color': '#FFEB3B'},      # Yellow
-    'animation': {'label': 'Animation', 'color': '#4CAF50'},    # Green
-    'fx': {'label': 'FX', 'color': '#F44336'},                  # Red
-    'lookdev': {'label': 'Look Dev', 'color': '#00BCD4'},       # Cyan
-    'general': {'label': 'General', 'color': '#607D8B'},        # Gray - default/catch-all
-}
-
-
-__all__ = ['Config', 'REVIEW_CYCLE_TYPES']
+__all__ = ['Config']

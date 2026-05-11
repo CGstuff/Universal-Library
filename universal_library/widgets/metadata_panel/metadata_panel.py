@@ -7,26 +7,23 @@ Orchestrates sub-panels for display of asset metadata.
 from typing import Optional, Dict, Any
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QComboBox, QGroupBox, QScrollArea, QFrame, QSizePolicy, QMenu
+    QComboBox, QGroupBox, QScrollArea, QFrame, QSizePolicy
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap
 
-from ...config import Config, REVIEW_CYCLE_TYPES
+from ...config import Config
 from ...events.event_bus import get_event_bus
 from ...events.entity_events import get_entity_event_bus
 from ...services.database_service import get_database_service
-from ...services.review_database import get_review_database
-from ...services.review_state_manager import get_review_state_manager
 from ...services.thumbnail_loader import get_thumbnail_loader
-from ...services.user_service import get_user_service
 from ...services.control_authority import get_control_authority
 
 from .panels import (
     IdentificationPanel, LineagePanel, ThumbnailPanel,
     TagsWidget, FoldersWidget
 )
-from .renderers import TechnicalInfoRenderer, ReviewStateRenderer, DynamicMetadataRenderer
+from .renderers import TechnicalInfoRenderer, DynamicMetadataRenderer
 from ..dialogs.version_history_dialog import VersionHistoryDialog
 
 
@@ -56,9 +53,7 @@ class MetadataPanel(QWidget):
         self._event_bus = get_event_bus()
         self._entity_event_bus = get_entity_event_bus()
         self._db_service = get_database_service()
-        self._review_db = get_review_database()
         self._thumbnail_loader = get_thumbnail_loader()
-        self._user_service = get_user_service()
         self._control_authority = get_control_authority()
 
         # Current asset
@@ -69,7 +64,6 @@ class MetadataPanel(QWidget):
         self._connect_signals()
         self._connect_entity_signals()
         self._clear_display()
-        self._update_review_visibility()
 
     def _get_category_for_type(self, asset_type: str) -> str:
         """Get the metadata category for an asset type."""
@@ -92,7 +86,9 @@ class MetadataPanel(QWidget):
 
         # Thumbnail
         self._thumbnail = ThumbnailPanel()
+        self._thumbnail.enlarge_requested.connect(self._on_enlarge_3d_requested)
         self._layout.addWidget(self._thumbnail)
+        self._enlarge_dialog = None  # lazy
 
         # Name label
         self._name_label = QLabel("No asset selected")
@@ -157,9 +153,6 @@ class MetadataPanel(QWidget):
 
         # Import settings
         self._setup_import_section()
-
-        # Review state renderer
-        self._setup_review_state()
 
         # Spacer before danger zone
         spacer = QWidget()
@@ -310,67 +303,6 @@ class MetadataPanel(QWidget):
         import_layout.addLayout(btn_row)
         self._layout.addWidget(self._import_group)
 
-    def _setup_review_state(self):
-        """Setup review state UI elements."""
-        # Submit review button
-        self._submit_review_btn = QPushButton("Start Review \u25bc")
-        self._submit_review_btn.setEnabled(False)
-        self._submit_review_btn.setToolTip("Start a review cycle for this asset")
-        self._submit_review_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #2196F3;
-                color: white;
-                font-weight: bold;
-                padding: 8px;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #1976D2; }
-            QPushButton:disabled { background-color: #555555; color: #888888; }
-        """)
-        self._submit_review_btn.hide()
-
-        # Cycle type menu
-        self._cycle_type_menu = QMenu(self)
-        self._cycle_type_menu.setStyleSheet("""
-            QMenu {
-                background-color: #2d2d2d;
-                border: 1px solid #555;
-            }
-            QMenu::item { padding: 8px 24px; color: #e0e0e0; }
-            QMenu::item:selected { background-color: #404040; }
-        """)
-
-        for cycle_type, info in REVIEW_CYCLE_TYPES.items():
-            action = self._cycle_type_menu.addAction(info.get('label', cycle_type.title()))
-            action.setData(cycle_type)
-
-        self._layout.addWidget(self._submit_review_btn)
-
-        # Review state widget
-        self._review_state_widget = QWidget()
-        review_state_layout = QHBoxLayout(self._review_state_widget)
-        review_state_layout.setContentsMargins(0, 4, 0, 4)
-        review_state_layout.setSpacing(8)
-
-        self._review_state_label = QLabel()
-        self._review_state_label.setStyleSheet("""
-            QLabel { font-weight: bold; padding: 4px 8px; border-radius: 4px; }
-        """)
-        review_state_layout.addWidget(self._review_state_label)
-        review_state_layout.addStretch()
-
-        self._review_state_widget.hide()
-        self._layout.addWidget(self._review_state_widget)
-
-        # Create renderer
-        self._review_renderer = ReviewStateRenderer(
-            self._review_state_widget,
-            self._review_state_label,
-            self._submit_review_btn,
-            self._cycle_type_menu
-        )
-        self._review_renderer.cycle_type_selected.connect(self._on_cycle_type_selected)
-
     def _setup_danger_zone(self):
         """Setup danger zone section with delete/retire button."""
         self._danger_group = QGroupBox()
@@ -426,8 +358,7 @@ class MetadataPanel(QWidget):
                 "PERMANENTLY delete this asset including:\n"
                 "\u2022 All versions and variants\n"
                 "\u2022 All files (USD, .blend, thumbnails)\n"
-                "\u2022 All archived versions\n"
-                "\u2022 All reviews, screenshots, and draw-overs\n\n"
+                "\u2022 All archived versions\n\n"
                 "This action cannot be undone!"
             )
             self._delete_btn.setStyleSheet("""
@@ -501,14 +432,10 @@ class MetadataPanel(QWidget):
         self._edit_btn.clicked.connect(self._on_edit_clicked)
         self._import_btn.clicked.connect(self._on_import_clicked)
         self._replace_btn.clicked.connect(self._on_replace_clicked)
-        self._submit_review_btn.clicked.connect(self._on_submit_review_clicked)
         self._delete_btn.clicked.connect(self._on_delete_clicked)
 
         self._event_bus.asset_selected.connect(self._on_asset_selected)
         self._thumbnail_loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
-
-        # Studio mode changes
-        self._user_service.mode_changed.connect(self._on_studio_mode_changed)
 
         # Operation mode changes (for delete/retire button)
         self._control_authority.mode_changed.connect(self._on_operation_mode_changed)
@@ -579,13 +506,8 @@ class MetadataPanel(QWidget):
         # Panels
         self._id_panel.display(asset)
 
-        # Get review status for comment count
-        version_label = asset.get('version_label', 'v001')
-        version_group_id = asset.get('version_group_id') or asset.get('asset_id')
-        review_status = self._review_db.get_review_status(uuid, version_label, version_group_id)
-        unresolved_count = review_status.get('unresolved_notes', 0)
-
-        self._lineage_panel.display(asset, unresolved_count)
+        # Lineage panel (review system removed — no unresolved comment count)
+        self._lineage_panel.display(asset, 0)
 
         # Representation designations (mesh and rig)
         if asset_type in ('mesh', 'rig'):
@@ -611,26 +533,6 @@ class MetadataPanel(QWidget):
         self._replace_btn.setEnabled(True)
         self._delete_btn.setEnabled(True)
 
-        # Review state (only in studio mode)
-        if self._user_service.is_studio_mode():
-            review_state = review_status.get('review_state')
-            cycle_type = None
-            state_manager = get_review_state_manager()
-            cycle = state_manager.get_cycle_for_version(uuid, version_label)
-            if cycle:
-                cycle_type = cycle.get('cycle_type')
-
-            asset_id_for_cycle = (
-                asset.get('version_group_id') or asset.get('asset_id') or uuid
-            )
-            can_start = state_manager.can_start_new_cycle(asset_id_for_cycle)
-            active_cycle = state_manager.get_active_cycle(asset_id_for_cycle)
-
-            self._review_renderer.render(review_state, cycle_type, can_start, active_cycle)
-        else:
-            # Clear review UI in solo mode
-            self._review_renderer.clear()
-
         # Thumbnail
         thumbnail_path = asset.get('thumbnail_path')
         if thumbnail_path:
@@ -641,6 +543,9 @@ class MetadataPanel(QWidget):
                 self._thumbnail.set_loading()
         else:
             self._thumbnail.set_no_preview()
+
+        # Pass the full asset so the thumbnail panel can decide if 3D is offered
+        self._thumbnail.set_asset(asset)
 
     def _render_dynamic_metadata(self, asset: Dict[str, Any], category: str):
         """
@@ -683,6 +588,7 @@ class MetadataPanel(QWidget):
         self._type_label.setText("")
         self._type_label.setStyleSheet("")
         self._thumbnail.set_no_preview()
+        self._thumbnail.clear_asset()
 
         self._id_panel.clear()
         self._lineage_panel.clear()
@@ -697,8 +603,6 @@ class MetadataPanel(QWidget):
         self._import_btn.setEnabled(False)
         self._replace_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
-
-        self._review_renderer.clear()
 
     def _on_history_clicked(self):
         """Handle version history button click."""
@@ -744,78 +648,9 @@ class MetadataPanel(QWidget):
                 # Studio/Pipeline mode - retire instead
                 self._event_bus.request_retire_assets.emit([self._current_uuid])
 
-    def _on_submit_review_clicked(self):
-        """Handle submit for review button click."""
-        if not self._current_uuid or not self._current_asset:
-            return
-        self._review_renderer.show_menu_at_button()
-
-    def _on_cycle_type_selected(self, cycle_type: str):
-        """Handle cycle type selection from menu."""
-        if not self._current_uuid or not self._current_asset:
-            return
-
-        user_service = get_user_service()
-        current_user = user_service.get_current_username()
-
-        # Get version_group_id to find the latest version
-        version_group_id = (
-            self._current_asset.get('version_group_id') or
-            self._current_asset.get('asset_id') or
-            self._current_uuid
-        )
-
-        # IMPORTANT: Fetch latest version from DB to avoid starting review on stale data
-        # This ensures the review cycle starts on the actual latest version, not
-        # whatever version was cached when the panel was loaded
-        latest_version = self._db_service.get_latest_asset_version(version_group_id)
-        if latest_version:
-            version_label = latest_version.get('version_label', 'v001')
-            asset_id_for_cycle = latest_version.get('version_group_id') or version_group_id
-        else:
-            # Fallback to cached data if latest not found
-            version_label = self._current_asset.get('version_label', 'v001')
-            asset_id_for_cycle = version_group_id
-
-        state_manager = get_review_state_manager()
-        success, message = state_manager.submit_for_review(
-            asset_id_for_cycle,
-            version_label,
-            cycle_type=cycle_type,
-            submitted_by=current_user
-        )
-
-        if success:
-            self._review_renderer.render('needs_review', cycle_type, False, None)
-            self._event_bus.asset_updated.emit(self._current_uuid)
-
-            cycle_label = REVIEW_CYCLE_TYPES.get(cycle_type, {}).get('label', cycle_type.title())
-            asset_name = self._current_asset.get('name', 'Unknown')
-        else:
-            pass
-
-    def _on_studio_mode_changed(self, is_studio: bool):
-        """Handle studio mode toggle (legacy - user management changes)."""
-        # Refresh display if we have an asset selected
-        if self._current_uuid:
-            self.display_asset(self._current_uuid)
-
-    def _update_review_visibility(self):
-        """Update review UI visibility based on operation mode.
-        
-        Review features are visible in Studio and Pipeline modes only,
-        hidden in Standalone mode.
-        """
-        from ...services.control_authority import OperationMode
-        show_review = self._control_authority.get_operation_mode() != OperationMode.STANDALONE
-        # Hide review button and state widget in standalone mode
-        self._submit_review_btn.setVisible(show_review)
-        self._review_state_widget.setVisible(show_review)
-
     def _on_operation_mode_changed(self, mode):
-        """Handle operation mode change - update delete/retire button and review visibility."""
+        """Handle operation mode change - update delete/retire button styling."""
         self._update_danger_zone_style()
-        self._update_review_visibility()
         # Refresh display if we have an asset selected
         if self._current_uuid:
             self.display_asset(self._current_uuid)
@@ -953,6 +788,24 @@ class MetadataPanel(QWidget):
 
         if self._current_uuid:
             self.display_asset(self._current_uuid)
+
+    def _on_enlarge_3d_requested(self, glb_path: str):
+        """Open the enlarged 3D viewer for the current asset."""
+        if not glb_path:
+            return
+        from ..viewport_3d import EnlargedViewerDialog
+        asset_name = (self._current_asset or {}).get('name')
+        # Reuse if already open — just swap the asset
+        if self._enlarge_dialog is not None and self._enlarge_dialog.isVisible():
+            self._enlarge_dialog.setWindowTitle(
+                f"3D Preview — {asset_name}" if asset_name else "3D Preview"
+            )
+            self._enlarge_dialog.load_glb(glb_path)
+            self._enlarge_dialog.raise_()
+            self._enlarge_dialog.activateWindow()
+            return
+        self._enlarge_dialog = EnlargedViewerDialog(glb_path, asset_name, self)
+        self._enlarge_dialog.show()
 
     def get_import_method(self) -> str:
         """Get import method — always BLEND."""

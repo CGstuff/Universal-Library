@@ -11,8 +11,10 @@ import shutil
 import os
 from pathlib import Path
 from datetime import datetime
-from bpy.props import StringProperty, BoolProperty, EnumProperty
-from bpy.types import Operator
+from bpy.props import (
+    StringProperty, BoolProperty, EnumProperty, IntProperty, CollectionProperty,
+)
+from bpy.types import Operator, PropertyGroup, UIList
 
 from ..utils.library_connection import get_library_connection
 from ..utils.material_converter import get_material_converter
@@ -20,6 +22,7 @@ from ..utils.naming_utils import get_asset_namer, set_custom_prefixes
 from ..utils.metadata_collector import collect_all_metadata, collect_material_metadata
 from ..utils.viewport_capture import capture_viewport_thumbnail, create_placeholder_thumbnail
 from ..preferences import get_preferences, get_naming_prefixes
+from ..gltf_action_filter import gltf_action_filter_session
 
 
 # JSON Metadata Schema Version
@@ -171,6 +174,38 @@ def read_json_metadata(json_path: Path) -> dict:
     return {}
 
 
+class UAL_ActionPickerItem(PropertyGroup):
+    """One row in the rig export's animation picker.
+
+    The picker lists every OBJECT-rooted Action in the .blend so the user
+    explicitly chooses which animations belong to *this* rig. The picked
+    set drives both the .blend save (data_blocks for libraries.write) and
+    the .glb export filter (gltf_action_filter_session). No bone-name
+    heuristics, no NLA staging — the user is the source of truth.
+    """
+    action_name: StringProperty()
+    include: BoolProperty(default=False)
+    attached: BoolProperty(
+        default=False,
+        description="Whether this action is currently attached to the armature "
+                    "(active action or in an NLA strip). Display-only hint."
+    )
+
+
+class UAL_UL_action_picker(UIList):
+    """Scrollable checkbox list rendered inside the rig export dialog."""
+
+    def draw_item(self, context, layout, data, item, icon,
+                  active_data, active_propname, index):
+        row = layout.row(align=True)
+        row.prop(item, 'include', text='')
+        row.label(text=item.action_name)
+        if item.attached:
+            sub = row.row()
+            sub.alignment = 'RIGHT'
+            sub.label(text="(attached)", icon='ANIM_DATA')
+
+
 class UAL_OT_export_to_library(Operator):
     """Export selected objects to Universal Library"""
     bl_idname = "ual.export_to_library"
@@ -264,11 +299,27 @@ class UAL_OT_export_to_library(Operator):
         default=True
     )
 
+    confirm_partial_export: BoolProperty(
+        name="Confirm partial export",
+        description=(
+            "I'm intentionally saving fewer meshes/polygons than the previous "
+            "version. Tick this only if you mean to shrink the asset; otherwise "
+            "check your selection."
+        ),
+        default=False,
+    )
+
     new_variant_name: StringProperty(
         name="Variant Name",
         description="Name for the new variant (e.g., 'Destroyed', 'Red')",
         default=""
     )
+
+    # Rig-only: explicit picker of which Actions belong to this rig.
+    # Populated in invoke() when the asset type is detected as 'rig'.
+    # Drives both the .blend save and the .glb export filter.
+    action_picker: CollectionProperty(type=UAL_ActionPickerItem)
+    action_picker_index: IntProperty(default=0)
 
     # Hidden properties for version tracking (set automatically)
     source_uuid: StringProperty(default="")
@@ -298,6 +349,12 @@ class UAL_OT_export_to_library(Operator):
         # Auto-detect type first (needed for naming)
         if context.selected_objects:
             self.asset_type = self._detect_asset_type(context.selected_objects)
+
+            # Populate the rig action picker. Pre-checks the actions currently
+            # attached to the selected armature (active + NLA strip references),
+            # leaves everything else unchecked. The user explicitly picks the
+            # extras they want shipped.
+            self._populate_action_picker(context)
 
             # If we have UAL metadata, use the source asset name and suggest new version
             if self.has_ual_metadata and self.source_asset_name:
@@ -395,6 +452,11 @@ class UAL_OT_export_to_library(Operator):
                 version_box.label(text=f"Will create: v{next_version:03d}", icon='INFO')
                 version_box.prop(self, "archive_previous")
 
+                # Partial-export warning (catches accidental single-mesh re-exports)
+                partial_info = self._check_partial_export(context)
+                if partial_info:
+                    self._draw_partial_export_warning(layout, partial_info)
+
                 # Show version comparison
                 self._draw_version_comparison(context, layout)
 
@@ -442,6 +504,25 @@ class UAL_OT_export_to_library(Operator):
         box.prop(self, "include_materials")
         box.prop(self, "include_animations")
         box.prop(self, "export_selected_only")
+
+        # Rig-only: explicit animation picker. Drives both .blend save and
+        # .glb export — no bone-name guessing, no NLA staging.
+        if self.asset_type == 'rig' and len(self.action_picker) > 0:
+            anim_box = layout.box()
+            anim_box.label(text="Animations to include:", icon='ANIM')
+            row_count = min(8, max(3, len(self.action_picker)))
+            anim_box.template_list(
+                'UAL_UL_action_picker', '',
+                self, 'action_picker',
+                self, 'action_picker_index',
+                rows=row_count,
+            )
+            # Quick summary so the user can see how many they've picked
+            picked = sum(1 for it in self.action_picker if it.include)
+            anim_box.label(
+                text=f"{picked} of {len(self.action_picker)} selected",
+                icon='CHECKMARK' if picked else 'INFO',
+            )
 
         # USD export temporarily disabled - Blender-centric workflow
         # box.separator()
@@ -509,6 +590,21 @@ class UAL_OT_export_to_library(Operator):
                     f"Asset '{self.source_asset_name}' has been retired. "
                     "Cannot add new versions to a retired asset. "
                     "Restore it first or export as a new asset."
+                )
+                return {'CANCELLED'}
+
+        # Partial-export guard: if the current selection is much smaller than the
+        # previous version, abort unless the user explicitly confirmed.
+        if is_new_version and not self.confirm_partial_export:
+            partial_info = self._check_partial_export(context)
+            if partial_info:
+                self.report(
+                    {'ERROR'},
+                    f"Selection looks smaller than previous version "
+                    f"({partial_info['prev_label']}): "
+                    f"{partial_info['curr_meshes']} mesh(es) / {partial_info['curr_polys']:,} polys "
+                    f"vs {partial_info['prev_meshes']} mesh(es) / {partial_info['prev_polys']:,} polys. "
+                    "If this is intentional, tick 'Confirm partial export' in the dialog and try again."
                 )
                 return {'CANCELLED'}
 
@@ -601,6 +697,19 @@ class UAL_OT_export_to_library(Operator):
             thumbnail_current = library_folder / "thumbnail.current.png"
             if thumbnail_versioned.exists():
                 shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            
+            # Export glTF preview for WL/3D viewport (mesh, collection, rig).
+            # Rigs export at rest pose with their bound meshes only — no joints
+            # or animation. Camera/light/material/etc. don't need 3D preview.
+            if self.asset_type in ('mesh', 'collection', 'rig'):
+                gltf_filename = f"preview.{version_label}.glb"
+                gltf_versioned = library_folder / gltf_filename
+                self._export_gltf_preview(context, str(gltf_versioned))
+
+                # Also create preview.current.glb (stable path)
+                gltf_current = library_folder / "preview.current.glb"
+                if gltf_versioned.exists():
+                    shutil.copy2(str(gltf_versioned), str(gltf_current))
             
             # For DB and archive, use appropriate paths
             thumbnail_path = thumbnail_current  # Latest uses .current for cache watching
@@ -699,6 +808,10 @@ class UAL_OT_export_to_library(Operator):
                 'camera_clip_end': metadata.get('camera_clip_end'),
                 'camera_dof_enabled': metadata.get('camera_dof_enabled'),
                 'camera_ortho_scale': metadata.get('camera_ortho_scale'),
+                # Bounding box (world-space dimensions)
+                'bbox_x': metadata.get('bbox_x'),
+                'bbox_y': metadata.get('bbox_y'),
+                'bbox_z': metadata.get('bbox_z'),
                 # Mesh extended metadata
                 'vertex_group_count': metadata.get('vertex_group_count'),
                 'shape_key_count': metadata.get('shape_key_count'),
@@ -739,6 +852,7 @@ class UAL_OT_export_to_library(Operator):
             # - New variant: inherits folders from source variant (same family)
             if (is_new_version or is_new_variant) and self.source_uuid:
                 library.copy_folders_to_asset(self.source_uuid, asset_uuid)
+                library.copy_tags_to_asset(self.source_uuid, asset_uuid)
 
             # Note: _update_object_metadata was already called before save to ensure the .blend
             # file has correct metadata. This second call ensures the current scene objects
@@ -854,6 +968,94 @@ class UAL_OT_export_to_library(Operator):
                     warnings.append(f"'{slot.material.name}': Some features may be lost")
 
         return warnings
+
+    # ------------------------------------------------------------------
+    # Partial-export safeguard
+    # ------------------------------------------------------------------
+
+    # Suspicious shrink threshold: current must be < 50% of previous AND
+    # previous must be substantial enough that the drop is meaningful.
+    _PARTIAL_DROP_THRESHOLD = 0.5
+    _PARTIAL_MIN_PREV_POLYS = 1000
+    _PARTIAL_MIN_PREV_MESHES = 2
+
+    def _check_partial_export(self, context):
+        """
+        Check if this looks like an accidental partial re-export.
+
+        Catches the gotcha where a user selects ONE mesh from a multi-mesh
+        asset that still carries UAL metadata and exports — which would
+        replace the whole asset with just that one mesh.
+
+        Returns:
+            dict with prev_polys, prev_meshes, curr_polys, curr_meshes if a
+            suspicious drop is detected. None otherwise.
+        """
+        # Only relevant for re-exports of an existing asset
+        if self.export_mode != 'NEW_VERSION' or not self.has_ual_metadata or not self.source_uuid:
+            return None
+
+        try:
+            library = get_library_connection()
+            prev_asset = library.get_asset_by_uuid(self.source_uuid)
+        except Exception:
+            return None
+        if not prev_asset:
+            return None
+
+        prev_polys = prev_asset.get('polygon_count') or 0
+        prev_meshes = prev_asset.get('mesh_count') or 0
+
+        # Fallback: if mesh_count wasn't stored on previous (older plugin),
+        # treat "has_skeleton or many polys" as a multi-object asset for
+        # the warning threshold. Otherwise we can only act on poly count.
+
+        sel = context.selected_objects or []
+        curr_polys = 0
+        curr_meshes = 0
+        for obj in sel:
+            if obj.type == 'MESH' and obj.data:
+                curr_polys += len(obj.data.polygons)
+                curr_meshes += 1
+
+        poly_drop = (
+            prev_polys >= self._PARTIAL_MIN_PREV_POLYS and
+            curr_polys < prev_polys * self._PARTIAL_DROP_THRESHOLD
+        )
+        mesh_drop = (
+            prev_meshes >= self._PARTIAL_MIN_PREV_MESHES and
+            curr_meshes < prev_meshes * self._PARTIAL_DROP_THRESHOLD
+        )
+
+        if not (poly_drop or mesh_drop):
+            return None
+
+        return {
+            'prev_polys': prev_polys,
+            'prev_meshes': prev_meshes,
+            'curr_polys': curr_polys,
+            'curr_meshes': curr_meshes,
+            'prev_label': prev_asset.get('version_label', 'v???'),
+        }
+
+    def _draw_partial_export_warning(self, layout, info):
+        """Yellow warning box in the export dialog with the confirm checkbox."""
+        warn_box = layout.box()
+        warn_box.alert = True
+        warn_box.label(text="Smaller selection than previous version", icon='ERROR')
+        warn_box.label(
+            text=f"  Previous ({info['prev_label']}): "
+                 f"{info['prev_meshes']} mesh(es), {info['prev_polys']:,} polys"
+        )
+        warn_box.label(
+            text=f"  Current selection: "
+                 f"{info['curr_meshes']} mesh(es), {info['curr_polys']:,} polys"
+        )
+        warn_box.label(
+            text="Did you only select one mesh from a multi-mesh asset?",
+            icon='QUESTION'
+        )
+        warn_box.prop(self, "confirm_partial_export")
 
     def _draw_version_comparison(self, context, layout):
         """Draw version comparison section showing changes from previous version"""
@@ -1035,6 +1237,34 @@ class UAL_OT_export_to_library(Operator):
                             data_blocks.add(col)
                             break
 
+                # Explicitly include the actions the user ticked in the rig
+                # picker. `bpy.data.libraries.write` is a SUBSET save — it
+                # only follows references reachable from data_blocks. Actions
+                # the user marked with fake_user but didn't currently attach
+                # via active/NLA would otherwise be silently dropped.
+                picked_names = self._selected_action_names()
+                added = []
+                missing = []
+                for name in picked_names:
+                    action = bpy.data.actions.get(name)
+                    if action is not None:
+                        data_blocks.add(action)
+                        added.append(name)
+                    else:
+                        missing.append(name)
+                print(
+                    f"[UL] _save_blend_backup: picker={sorted(picked_names)}, "
+                    f"added_to_save={sorted(added)}"
+                    + (f", MISSING_FROM_BPY={sorted(missing)}" if missing else "")
+                )
+                action_blocks = [
+                    b for b in data_blocks if isinstance(b, bpy.types.Action)
+                ]
+                print(
+                    f"[UL] _save_blend_backup: total data_blocks={len(data_blocks)}, "
+                    f"actions in data_blocks={[a.name for a in action_blocks]}"
+                )
+
             # Write only selected data blocks to file
             bpy.data.libraries.write(
                 filepath,
@@ -1042,9 +1272,371 @@ class UAL_OT_export_to_library(Operator):
                 path_remap='RELATIVE_ALL',
                 compress=True
             )
+            print(f"[UL] _save_blend_backup: wrote {filepath}")
 
+        except Exception as e:
+            # Surface the failure instead of swallowing — best-effort meant
+            # "don't abort the whole export" not "hide bugs from us".
+            import traceback
+            print(f"[UL] _save_blend_backup FAILED: {e}")
+            traceback.print_exc()
+
+    # Max dimension for textures embedded in the preview .glb. Anything larger
+    # is downscaled in a temporary copy before export and restored after.
+    _PREVIEW_TEXTURE_CAP = 1024
+
+    def _export_gltf_preview(self, context, filepath: str):
+        """Export lightweight glTF preview for the in-app 3D viewport.
+
+        Exports selected objects as a .glb file with:
+        - Meshes with normals + UVs
+        - Basic materials (PBR baseColor only, used by the in-app viewer)
+        - No animations
+        - For rig assets: bound meshes only, baked at rest pose. Armatures
+          themselves are not exported (the viewer doesn't render joints).
+        - Textures over _PREVIEW_TEXTURE_CAP² are temporarily downscaled.
+        """
+        import traceback
+        from pathlib import Path
+
+        # Store state we may need to restore
+        original_selection = list(context.selected_objects)
+        original_active = context.view_layer.objects.active
+
+        if not original_selection:
+            print(f"[UL] glTF preview: No objects selected, skipping")
+            return
+
+        # Build the export-time selection. Rigs ship as armature + bound meshes
+        # with skinning + animations. Other types just ship the user's selection.
+        is_rig = (self.asset_type == 'rig')
+        hidden_to_restore = []                # objects whose hide state we changed
+        restore_textures = lambda: None       # filled in before gltf export
+        rig_armature = None                   # primary armature for the action filter
+        rig_action_names = set()              # discovered actions for the rig
+
+        try:
+            if is_rig:
+                bound_meshes = self._collect_rig_export_meshes(original_selection)
+                if not bound_meshes:
+                    print(f"[UL] glTF preview: rig has no bound meshes, skipping .glb")
+                    return
+
+                armatures = [obj for obj in original_selection if obj.type == 'ARMATURE']
+                if not armatures:
+                    print(f"[UL] glTF preview: rig has no armature, skipping .glb")
+                    return
+                rig_armature = armatures[0]
+
+                # Use the explicit set the user picked in the rig dialog.
+                # Single source of truth — same set drives .blend preservation.
+                rig_action_names = self._selected_action_names()
+                print(
+                    f"[UL] glTF preview: rig actions picked: "
+                    f"{sorted(rig_action_names) or '<none>'}"
+                )
+
+                # Export selection = armatures + bound meshes.
+                # Armature(s) carry the skinning info that glTF needs.
+                export_objects = list(armatures) + bound_meshes
+                for obj in original_selection:
+                    obj.select_set(False)
+                for obj in export_objects:
+                    if obj.hide_get():
+                        obj.hide_set(False)
+                        hidden_to_restore.append(obj)
+                    obj.select_set(True)
+                context.view_layer.objects.active = rig_armature
+            else:
+                export_objects = original_selection
+                for obj in export_objects:
+                    if obj.hide_get():
+                        obj.hide_set(False)
+                        hidden_to_restore.append(obj)
+
+            print(f"[UL] glTF preview: Exporting {len(export_objects)} objects to {filepath}")
+
+            # Swap any oversized textures for downscaled copies. Returns a
+            # restore callable so the user's source materials revert in finally.
+            restore_textures = self._downscale_textures_for_export(
+                export_objects, self._PREVIEW_TEXTURE_CAP
+            )
+
+            # Standard glTF uses Y-up; the in-app viewer converts to Z-up on load.
+            # WEBP textures (quality 75) typically shrink the .glb by 5-15x vs the
+            # default 'AUTO' format, which preserves source PNGs. Qt 5.13+ decodes
+            # WEBP natively via QImage, so no loader change is needed.
+            # Draco compression bakes mesh data via KHR_draco_mesh_compression;
+            # the in-app viewer decodes this via the DracoPy module on load.
+            gltf_kwargs = dict(
+                filepath=filepath,
+                use_selection=True,
+                export_format='GLB',
+                export_texcoords=True,
+                export_normals=True,
+                export_materials='EXPORT',
+                export_image_format='WEBP',
+                export_image_quality=75,
+                export_draco_mesh_compression_enable=True,
+                export_draco_mesh_compression_level=6,
+                export_draco_position_quantization=14,
+                export_draco_normal_quantization=10,
+                export_draco_texcoord_quantization=12,
+                export_draco_color_quantization=10,
+                export_draco_generic_quantization=12,
+                export_cameras=False,
+                export_lights=False,
+            )
+            if is_rig:
+                # Rigs: keep skinning, export deform-only skeleton + animations.
+                # `export_anim_single_armature=True` makes Blender's ACTIONS
+                # mode iterate every armature-targeting Action in bpy.data.actions
+                # (not just active + NLA) — that's what offers "loose" actions
+                # to our gather_actions_hook. The filter (Phase 6.2) then trims
+                # the offered list to ONLY what the user picked, so the dump
+                # is constrained and there's no cross-rig leakage.
+                gltf_kwargs.update(
+                    export_animations=True,
+                    export_animation_mode='ACTIONS',
+                    export_def_bones=True,         # only deform bones in the skeleton
+                    export_skins=True,
+                    export_apply=False,            # don't bake — would destroy skinning
+                    export_anim_single_armature=True,
+                )
+                with gltf_action_filter_session(rig_armature, rig_action_names):
+                    result = bpy.ops.export_scene.gltf(**gltf_kwargs)
+            else:
+                # Static meshes / collections: bake modifiers, no animation.
+                gltf_kwargs.update(
+                    export_animations=False,
+                    export_apply=True,             # apply modifiers
+                )
+                result = bpy.ops.export_scene.gltf(**gltf_kwargs)
+
+            print(f"[UL] glTF preview: Export result = {result}")
+
+            if Path(filepath).exists():
+                size = Path(filepath).stat().st_size
+                print(f"[UL] glTF preview: Success! File size = {size} bytes")
+            else:
+                print(f"[UL] glTF preview: WARNING - File not created at {filepath}")
+
+        except Exception as e:
+            print(f"[UL] glTF preview export FAILED: {e}")
+            traceback.print_exc()
+        finally:
+            # Revert any texture swaps + delete temp downscaled copies.
+            try:
+                restore_textures()
+            except Exception as e:
+                print(f"[UL] glTF preview: texture restore failed: {e}")
+
+            # Restore visibility of objects we un-hid
+            for obj in hidden_to_restore:
+                try:
+                    obj.hide_set(True)
+                except Exception:
+                    pass
+
+            # Restore selection
+            try:
+                for obj in bpy.context.selected_objects:
+                    obj.select_set(False)
+                for obj in original_selection:
+                    if obj:
+                        obj.select_set(True)
+                if original_active:
+                    context.view_layer.objects.active = original_active
+            except Exception:
+                pass
+
+    def _downscale_textures_for_export(self, export_objects, cap: int):
+        """Swap oversized textures on the selected objects' materials for
+        downscaled copies, then return a callable that reverts every change
+        and removes the temp copies. Safe to call on any selection — if no
+        texture exceeds `cap`, the returned restore is a no-op.
+
+        We touch only `ShaderNodeTexImage` nodes (including those inside node
+        groups). Multiple nodes that point at the same source image share a
+        single downscaled copy.
+        """
+        swap_nodes = self._collect_image_nodes(export_objects)
+
+        # original Image -> downscaled-copy Image (so we make one copy per src)
+        copies: dict = {}
+        # (node, original_image) — list of swaps to revert
+        swaps: list = []
+
+        for node in swap_nodes:
+            original = node.image
+            if original is None:
+                continue
+            sw, sh = original.size
+            if sw <= 0 or sh <= 0:
+                # Unloaded / placeholder image — skip
+                continue
+            if sw <= cap and sh <= cap:
+                continue
+
+            copy = copies.get(original.name)
+            if copy is None:
+                # Preserve aspect ratio
+                if sw >= sh:
+                    nw, nh = cap, max(1, int(sh * cap / sw))
+                else:
+                    nw, nh = max(1, int(sw * cap / sh)), cap
+                try:
+                    copy = original.copy()
+                    copy.name = f"_UL_PREVIEW_{original.name}"
+                    copy.scale(nw, nh)
+                    copies[original.name] = copy
+                    print(
+                        f"[UL] glTF preview: downscaled "
+                        f"'{original.name}' {sw}x{sh} -> {nw}x{nh}"
+                    )
+                except Exception as e:
+                    print(f"[UL] glTF preview: downscale failed for "
+                          f"'{original.name}': {e}")
+                    continue
+
+            swaps.append((node, original))
+            node.image = copy
+
+        def _restore():
+            # Revert node pointers first
+            for node, original in swaps:
+                try:
+                    node.image = original
+                except Exception:
+                    pass
+            # Then remove the temp copies
+            for copy in copies.values():
+                try:
+                    bpy.data.images.remove(copy)
+                except Exception:
+                    pass
+
+        return _restore
+
+    def _collect_image_nodes(self, export_objects):
+        """Yield every `ShaderNodeTexImage` reachable from the export objects'
+        materials, recursing into node groups."""
+        out = []
+        seen_trees = set()  # node_tree names already walked
+        seen_materials = set()
+
+        def _walk(tree):
+            if tree is None:
+                return
+            key = tree.name_full if hasattr(tree, 'name_full') else tree.name
+            if key in seen_trees:
+                return
+            seen_trees.add(key)
+            for node in tree.nodes:
+                if node.bl_idname == 'ShaderNodeTexImage':
+                    if getattr(node, 'image', None):
+                        out.append(node)
+                elif node.type == 'GROUP' and getattr(node, 'node_tree', None):
+                    _walk(node.node_tree)
+
+        for obj in export_objects:
+            if obj.type != 'MESH':
+                continue
+            for slot in obj.material_slots:
+                mat = slot.material
+                if not mat or mat.name in seen_materials:
+                    continue
+                seen_materials.add(mat.name)
+                if not getattr(mat, 'use_nodes', False):
+                    continue
+                _walk(mat.node_tree)
+        return out
+
+    def _collect_rig_export_meshes(self, selection):
+        """Return the mesh objects that belong to the rig in `selection`.
+
+        A mesh is considered "bound" to the rig if any of these holds:
+        - It has an Armature modifier targeting one of the selected armatures.
+        - It is parented to one of the selected armatures.
+        - It is already in the selection alongside the armature.
+        """
+        armatures = [obj for obj in selection if obj.type == 'ARMATURE']
+        if not armatures:
+            return []
+
+        arm_set = set(armatures)
+        out = []
+        seen = set()
+
+        def _add(obj):
+            if obj is None or obj.name in seen:
+                return
+            if obj.type != 'MESH':
+                return
+            seen.add(obj.name)
+            out.append(obj)
+
+        # Meshes already in the user's selection
+        for obj in selection:
+            if obj.type == 'MESH':
+                _add(obj)
+
+        # Walk the scene for meshes bound to any of our armatures
+        try:
+            scene_objects = list(bpy.context.view_layer.objects)
         except Exception:
-            pass  # Blend backup is best-effort
+            scene_objects = []
+
+        for obj in scene_objects:
+            if obj.type != 'MESH':
+                continue
+            # Direct parent armature
+            if obj.parent in arm_set:
+                _add(obj)
+                continue
+            # Armature modifier targeting our armature
+            for mod in getattr(obj, 'modifiers', []):
+                if getattr(mod, 'type', None) == 'ARMATURE':
+                    if getattr(mod, 'object', None) in arm_set:
+                        _add(obj)
+                        break
+
+        return out
+
+    def _populate_action_picker(self, context):
+        """Fill the action_picker collection. Pre-checks any action currently
+        attached to the selected armature (active + NLA strips on it)."""
+        self.action_picker.clear()
+
+        # Find which actions are already attached to the rig's armature, if any
+        attached_names = set()
+        for obj in context.selected_objects:
+            if obj.type != 'ARMATURE':
+                continue
+            anim = obj.animation_data
+            if anim is None:
+                continue
+            if anim.action is not None:
+                attached_names.add(anim.action.name)
+            for track in anim.nla_tracks:
+                for strip in track.strips:
+                    if strip.action is not None:
+                        attached_names.add(strip.action.name)
+
+        # List every OBJECT-rooted action in the .blend. Sorted alphabetically
+        # so the user gets a stable, scannable list.
+        for action in sorted(bpy.data.actions, key=lambda a: a.name.lower()):
+            id_root = getattr(action, 'id_root', None)
+            if id_root not in (None, 'OBJECT'):
+                continue
+            item = self.action_picker.add()
+            item.action_name = action.name
+            item.attached = action.name in attached_names
+            item.include = item.attached  # default: ship the attached ones
+
+    def _selected_action_names(self) -> set:
+        """Return the set of action names the user ticked in the picker."""
+        return {item.action_name for item in self.action_picker if item.include}
 
     def _generate_thumbnail(self, context, filepath: str):
         """Generate thumbnail using shared viewport capture utility."""
@@ -1425,9 +2017,10 @@ class UAL_OT_export_material(Operator):
 
             library.add_asset(asset_data)
 
-            # Copy folder memberships from source version to new version
+            # Copy folder memberships and tags from source version to new version
             if is_new_version and self.source_uuid:
                 library.copy_folders_to_asset(self.source_uuid, asset_uuid)
+                library.copy_tags_to_asset(self.source_uuid, asset_uuid)
 
             # Store metadata back on material for future versioning
             from ..utils.metadata_handler import store_material_metadata
@@ -1756,7 +2349,11 @@ class UAL_OT_export_material(Operator):
 
 
 # Registration
+# Order matters — UAL_ActionPickerItem must register BEFORE the operator that
+# uses it as a CollectionProperty type.
 classes = [
+    UAL_ActionPickerItem,
+    UAL_UL_action_picker,
     UAL_OT_export_to_library,
     UAL_OT_export_material,
 ]

@@ -11,11 +11,12 @@ import sys
 import shutil
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtGui import QPixmapCache
+from PyQt6.QtGui import QPixmapCache, QFontDatabase
 
 from .config import Config
 from .events.event_bus import get_event_bus
 from .themes import get_theme_manager
+from .themes.fonts import get_app_font
 from .utils.logging_config import LoggingConfig
 
 
@@ -53,6 +54,44 @@ def sync_protocol_to_library():
         pass
 
 
+def _load_bundled_fonts() -> None:
+    """
+    Load custom fonts bundled with the application.
+    
+    Fonts are loaded from assets/fonts/ directory.
+    This makes them available app-wide via their family name.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Determine base path (handles PyInstaller)
+    if getattr(sys, 'frozen', False):
+        base_path = Path(sys._MEIPASS) / 'universal_library'
+    else:
+        base_path = Path(__file__).parent
+    
+    fonts_dir = base_path / 'assets' / 'fonts'
+    
+    if not fonts_dir.exists():
+        logger.warning(f"Fonts directory not found: {fonts_dir}")
+        return
+    
+    # Load all .ttf files
+    loaded = []
+    for font_file in fonts_dir.glob('*.ttf'):
+        font_id = QFontDatabase.addApplicationFont(str(font_file))
+        if font_id >= 0:
+            families = QFontDatabase.applicationFontFamilies(font_id)
+            loaded.extend(families)
+        else:
+            logger.warning(f"Failed to load font: {font_file.name}")
+    
+    if loaded:
+        # Remove duplicates and log
+        unique_families = list(set(loaded))
+        logger.info(f"Loaded fonts: {', '.join(unique_families)}")
+
+
 def setup_application() -> QApplication:
     """
     Initialize and configure the Qt application
@@ -68,16 +107,17 @@ def setup_application() -> QApplication:
     app.setApplicationVersion(Config.APP_VERSION)
     app.setOrganizationName(Config.APP_AUTHOR)
 
+    # Load bundled fonts (must be before setFont)
+    _load_bundled_fonts()
+
+    # Set application-wide default font
+    app.setFont(get_app_font())
+
     # Configure global pixmap cache for thumbnail performance
     QPixmapCache.setCacheLimit(Config.PIXMAP_CACHE_SIZE_KB)
 
     # Initialize event bus (singleton)
     get_event_bus()
-
-    # Initialize ReviewService early to connect event handlers
-    # This enables auto-join of new versions to active review cycles
-    from .services.review import get_review_service
-    get_review_service()
 
     # Initialize theme manager and apply current theme
     theme_manager = get_theme_manager()

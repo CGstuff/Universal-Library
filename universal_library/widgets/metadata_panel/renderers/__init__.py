@@ -3,7 +3,6 @@ Metadata panel renderers.
 """
 
 from .technical_info import TechnicalInfoRenderer
-from .review_state import ReviewStateRenderer
 from .dynamic_renderer import (
     DynamicFieldWidget,
     DynamicMetadataRenderer,
@@ -12,7 +11,6 @@ from .dynamic_renderer import (
 
 __all__ = [
     'TechnicalInfoRenderer',
-    'ReviewStateRenderer',
     'DynamicFieldWidget',
     'DynamicMetadataRenderer',
     'DynamicTechnicalInfoRenderer',

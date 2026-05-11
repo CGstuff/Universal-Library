@@ -20,14 +20,12 @@ from .tree_view import VersionTreeView
 from .list_view import VersionListView
 from .action_handlers import VersionActionHandlers
 from .variant_manager import VariantManager
+from .diff_panel import DiffPanel
 
-from ....config import Config, REVIEW_CYCLE_TYPES
+from ....config import Config
 from ....services.database_service import get_database_service
 from ....services.cold_storage_service import get_cold_storage_service
 from ....services.thumbnail_loader import get_thumbnail_loader
-from ....services.user_service import get_user_service
-from ....services.control_authority import get_control_authority, OperationMode
-from ..asset_review_dialog import AssetReviewDialog
 from ..create_variant_dialog import CreateVariantDialog
 
 
@@ -39,7 +37,7 @@ class VersionHistoryDialog(QDialog):
     - List all versions of an asset (by version_group_id)
     - Show version label, status, date, is_latest, is_cold
     - Support for variants: switch between parallel version chains
-    - Actions: Set as Latest, Cold Storage, Lock, Publish, Review
+    - Actions: Set as Latest, Cold Storage, Lock, Publish
     """
 
     def __init__(self, version_group_id: str, parent=None):
@@ -55,7 +53,6 @@ class VersionHistoryDialog(QDialog):
         # View mode
         self._view_mode: str = "tree"
         self._notes_modified: bool = False
-        self._first_show: bool = True
 
         # Sub-components
         self._variant_manager = VariantManager(self, self._db_service, version_group_id)
@@ -75,7 +72,6 @@ class VersionHistoryDialog(QDialog):
         self._create_ui()
         self._connect_signals()
         self._initialize_data()
-        self._update_review_button_visibility()
 
     def _setup_size(self):
         """Configure dialog size based on screen."""
@@ -229,6 +225,21 @@ class VersionHistoryDialog(QDialog):
         controls_row.addWidget(self._show_thumbnails_btn)
         controls_row.addSpacing(10)
 
+        # Show diff toggle — inject inline diff rows under each version
+        self._show_diff_btn = QPushButton("Show Diff")
+        self._show_diff_btn.setCheckable(True)
+        self._show_diff_btn.setChecked(False)
+        self._show_diff_btn.setToolTip(
+            "Show a one-line diff under each version (tree view only)"
+        )
+        self._show_diff_btn.setStyleSheet("""
+            QPushButton { padding: 4px 10px; border: 1px solid #555; border-radius: 0px; }
+            QPushButton:checked { background-color: #2196F3; color: white; border-color: #2196F3; }
+            QPushButton:disabled { color: #666; border-color: #333; }
+        """)
+        controls_row.addWidget(self._show_diff_btn)
+        controls_row.addSpacing(10)
+
         # New variant button
         self._new_variant_btn = QPushButton("+ New Variant")
         self._new_variant_btn.setToolTip("Create a new variant from the selected Base version")
@@ -268,8 +279,8 @@ class VersionHistoryDialog(QDialog):
     def _create_tree(self) -> QTreeWidget:
         """Create tree for tree view."""
         tree = QTreeWidget()
-        tree.setHeaderLabels(["Asset", "Version", "Status", "Review", "VariantSet"])
-        tree.setColumnCount(5)
+        tree.setHeaderLabels(["Asset", "Version", "Status", "VariantSet"])
+        tree.setColumnCount(4)
         tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         tree.setAlternatingRowColors(True)
         tree.setIconSize(QSize(VersionHistoryConfig.THUMBNAIL_SIZE, VersionHistoryConfig.THUMBNAIL_SIZE))
@@ -277,7 +288,6 @@ class VersionHistoryDialog(QDialog):
         tree.setColumnWidth(0, 250)
         tree.setColumnWidth(1, 80)
         tree.setColumnWidth(2, 100)
-        tree.setColumnWidth(3, 100)
 
         return tree
 
@@ -302,27 +312,6 @@ class VersionHistoryDialog(QDialog):
         self._lock_btn = QPushButton("Lock")
         self._lock_btn.setToolTip("Lock version to prevent changes")
         actions_layout.addWidget(self._lock_btn)
-
-        self._review_btn = QPushButton("Review")
-        self._review_btn.setToolTip("Open review dialog for this version")
-        self._review_btn.setStyleSheet("""
-            QPushButton { background-color: #FF5722; color: white; font-weight: bold;
-                          padding: 6px 16px; border-radius: 4px; }
-            QPushButton:hover { background-color: #E64A19; }
-            QPushButton:disabled { background-color: #555; color: #888; }
-        """)
-        actions_layout.addWidget(self._review_btn)
-
-        self._mark_final_btn = QPushButton("Mark Final")
-        self._mark_final_btn.setToolTip("Mark the current review cycle as final")
-        self._mark_final_btn.setStyleSheet("""
-            QPushButton { background-color: #9C27B0; color: white; font-weight: bold;
-                          padding: 6px 16px; border-radius: 4px; }
-            QPushButton:hover { background-color: #7B1FA2; }
-            QPushButton:disabled { background-color: #555; color: #888; }
-        """)
-        self._mark_final_btn.setEnabled(False)
-        actions_layout.addWidget(self._mark_final_btn)
 
         actions_layout.addStretch()
         return actions_group
@@ -392,6 +381,11 @@ class VersionHistoryDialog(QDialog):
         self._info_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
         preview_layout.addWidget(self._info_label)
 
+        # Diff panel — shows what changed vs. a baseline prior version
+        self._diff_panel = DiffPanel()
+        self._diff_panel.setMaximumWidth(cfg.PREVIEW_SIZE)
+        preview_layout.addWidget(self._diff_panel)
+
         preview_layout.addStretch()
         return preview_widget
 
@@ -403,14 +397,13 @@ class VersionHistoryDialog(QDialog):
         self._search_edit.textChanged.connect(self._on_search_changed)
         self._hide_intermediate_btn.clicked.connect(self._on_hide_intermediate_toggled)
         self._show_thumbnails_btn.clicked.connect(self._on_show_thumbnails_toggled)
+        self._show_diff_btn.clicked.connect(self._on_show_diff_toggled)
         self._new_variant_btn.clicked.connect(self._on_new_variant_clicked)
 
         self._promote_btn.clicked.connect(self._on_promote_clicked)
         self._cold_storage_btn.clicked.connect(self._on_cold_storage_clicked)
         self._publish_btn.clicked.connect(self._on_publish_clicked)
         self._lock_btn.clicked.connect(self._on_lock_clicked)
-        self._review_btn.clicked.connect(self._on_review_clicked)
-        self._mark_final_btn.clicked.connect(self._on_mark_final_clicked)
 
         self._notes_edit.textChanged.connect(self._on_notes_changed)
         self._save_notes_btn.clicked.connect(self._on_save_notes_clicked)
@@ -447,12 +440,6 @@ class VersionHistoryDialog(QDialog):
         self._view_stack.setCurrentIndex(1)
         self._populate_tree()
 
-    def showEvent(self, event):
-        """Handle dialog show."""
-        super().showEvent(event)
-        if self._first_show:
-            self._first_show = False
-            QTimer.singleShot(50, self._tree_view._create_deferred_badge_widgets)
 
     def _request_tree_thumbnail(self, uuid: str, path: str, node):
         """Request thumbnail for tree node."""
@@ -473,10 +460,17 @@ class VersionHistoryDialog(QDialog):
             self._view_mode = "list"
             self._view_stack.setCurrentIndex(0)
             self._load_versions()
+            # Show Diff toggle is tree-only — disable in list mode
+            self._show_diff_btn.setEnabled(False)
+            self._show_diff_btn.setToolTip("Switch to Tree View to use inline diff")
         else:
             self._view_mode = "tree"
             self._view_stack.setCurrentIndex(1)
             self._populate_tree()
+            self._show_diff_btn.setEnabled(True)
+            self._show_diff_btn.setToolTip(
+                "Show a one-line diff under each version (tree view only)"
+            )
 
     def _on_search_changed(self, text: str):
         """Handle search filter change."""
@@ -491,6 +485,11 @@ class VersionHistoryDialog(QDialog):
     def _on_show_thumbnails_toggled(self):
         """Handle show thumbnails toggle."""
         self._tree_view.set_show_thumbnails(self._show_thumbnails_btn.isChecked())
+        self._populate_tree()
+
+    def _on_show_diff_toggled(self):
+        """Handle show-diff toggle — adds/removes inline diff child rows."""
+        self._tree_view.set_show_diff(self._show_diff_btn.isChecked())
         self._populate_tree()
 
     # ==================== Data Loading ====================
@@ -573,11 +572,33 @@ class VersionHistoryDialog(QDialog):
             self._update_info_panel(version)
             self._update_new_variant_button(version)
             self._preview_panel.update_display(version)
+            self._diff_panel.update_display(version, self._prior_versions_of(version))
         else:
             self._update_action_buttons(None)
             self._update_new_variant_button(None)
             self._preview_panel.update_display(None)
             self._info_label.setText("Select a version to see details")
+            self._diff_panel.clear()
+
+    def _prior_versions_of(self, version: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Return all versions in the same variant that come BEFORE this one,
+        sorted ascending by version number. Used as candidates for the diff
+        comparison baseline.
+        """
+        if not version:
+            return []
+        target_variant = version.get('variant_name') or version.get('_variant_name', 'Base')
+        target_version = version.get('version', 0)
+        candidates = []
+        for v in self._variant_manager.all_variants_data:
+            vname = v.get('variant_name') or v.get('_variant_name', 'Base')
+            if vname != target_variant:
+                continue
+            if (v.get('version') or 0) >= target_version:
+                continue
+            candidates.append(v)
+        candidates.sort(key=lambda x: x.get('version', 0))
+        return candidates
 
     def _get_selected_version(self) -> Optional[Dict[str, Any]]:
         """Get selected version from list view."""
@@ -602,17 +623,6 @@ class VersionHistoryDialog(QDialog):
 
     # ==================== UI Updates ====================
 
-    def _update_review_button_visibility(self):
-        """Update review button visibility based on operation mode.
-        
-        Review features are only available in Studio and Pipeline modes,
-        not in Standalone mode.
-        """
-        control_authority = get_control_authority()
-        is_review_mode = control_authority.get_operation_mode() != OperationMode.STANDALONE
-        self._review_btn.setVisible(is_review_mode)
-        self._mark_final_btn.setVisible(is_review_mode)
-
     def _update_action_buttons(self, version: Optional[Dict[str, Any]]):
         """Update action button states."""
         if not version:
@@ -620,8 +630,6 @@ class VersionHistoryDialog(QDialog):
             self._cold_storage_btn.setEnabled(False)
             self._publish_btn.setEnabled(False)
             self._lock_btn.setEnabled(False)
-            self._review_btn.setEnabled(False)
-            self._mark_final_btn.setEnabled(False)
             return
 
         # Check if version is retired - disable ALL actions
@@ -635,32 +643,7 @@ class VersionHistoryDialog(QDialog):
             self._publish_btn.setToolTip("Cannot modify retired asset")
             self._lock_btn.setEnabled(False)
             self._lock_btn.setToolTip("Cannot modify retired asset")
-            self._review_btn.setEnabled(False)
-            self._review_btn.setToolTip("Cannot review retired asset")
-            self._mark_final_btn.setEnabled(False)
-            self._mark_final_btn.setToolTip("Cannot modify retired asset")
             return
-
-        # Only enable review button in Studio/Pipeline modes (not Standalone)
-        control_authority = get_control_authority()
-        is_review_mode = control_authority.get_operation_mode() != OperationMode.STANDALONE
-        self._review_btn.setEnabled(is_review_mode)
-
-        # Mark Final button (only in Studio/Pipeline modes)
-        if is_review_mode:
-            from ....services.review_state_manager import get_review_state_manager
-            state_manager = get_review_state_manager()
-            cycle = state_manager.get_cycle_for_version(version.get('uuid'), version.get('version_label', 'v001'))
-            if cycle and cycle.get('review_state') == 'approved':
-                self._mark_final_btn.setEnabled(True)
-                cycle_type = cycle.get('cycle_type', 'general')
-                cycle_label = REVIEW_CYCLE_TYPES.get(cycle_type, {}).get('label', cycle_type.title())
-                self._mark_final_btn.setToolTip(f"Mark {cycle_label} cycle as Final")
-            else:
-                self._mark_final_btn.setEnabled(False)
-                self._mark_final_btn.setToolTip("Mark the current review cycle as final (requires approved state)")
-        else:
-            self._mark_final_btn.setEnabled(False)
 
         is_latest = version.get('is_latest', 0) == 1
         is_cold = version.get('is_cold', 0) == 1
@@ -818,38 +801,6 @@ class VersionHistoryDialog(QDialog):
     def _on_lock_clicked(self):
         """Handle lock action."""
         self._action_handlers.on_lock()
-
-    def _on_review_clicked(self):
-        """Handle review action."""
-        version = self._get_version_for_action(check_all_variants=True)
-        if not version:
-            return
-
-        # Use version_group_id for review dialog since sessions/cycles are tracked at family level
-        version_group_id = version.get('version_group_id') or version.get('asset_id') or version.get('uuid', '')
-        variant_name = version.get('variant_name', 'Base')
-
-        user_service = get_user_service()
-        control_authority = get_control_authority()
-        # Review dialog is available in Studio and Pipeline modes
-        is_review_mode = control_authority.get_operation_mode() != OperationMode.STANDALONE
-        dialog = AssetReviewDialog(
-            asset_uuid=version_group_id,  # Family UUID for session/cycle tracking
-            version_label=version.get('version_label', 'v001'),
-            asset_name=version.get('name', ''),
-            asset_id=version_group_id,  # Same as asset_uuid for storage paths
-            variant_name=variant_name,
-            is_studio_mode=is_review_mode,
-            current_user=user_service.get_current_username(),
-            current_user_role=user_service.get_current_role(),
-            parent=self
-        )
-        dialog.exec()
-        self._populate_tree()
-
-    def _on_mark_final_clicked(self):
-        """Handle mark final action."""
-        self._action_handlers.on_mark_final(self._populate_tree)
 
     def _on_new_variant_clicked(self):
         """Handle new variant action."""

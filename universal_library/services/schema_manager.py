@@ -131,6 +131,9 @@ class SchemaManager:
                 version_label TEXT DEFAULT 'v001',
                 version_group_id TEXT,
                 is_latest INTEGER DEFAULT 1,
+                bbox_x REAL,
+                bbox_y REAL,
+                bbox_z REAL,
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 modified_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (folder_id) REFERENCES folders (id) ON DELETE CASCADE
@@ -274,6 +277,10 @@ class SchemaManager:
             'is_retired': 'INTEGER DEFAULT 0',
             'retired_date': 'TIMESTAMP',
             'retired_by': 'TEXT',
+            # Bounding box (world-space dimensions in meters)
+            'bbox_x': 'REAL',
+            'bbox_y': 'REAL',
+            'bbox_z': 'REAL',
         }
 
         self._add_missing_columns(cursor, 'assets', asset_columns, asset_columns_existing)
@@ -283,7 +290,6 @@ class SchemaManager:
         self._create_tags_tables(cursor)
         self._create_asset_folders_table(cursor)
         self._create_entity_system_tables(cursor)
-        self._create_asset_audit_table(cursor)
         self._create_app_settings_table(cursor)
         self._create_representation_designations_table(cursor)
         self._create_custom_proxies_table(cursor)
@@ -342,11 +348,25 @@ class SchemaManager:
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT UNIQUE NOT NULL,
+                parent_id INTEGER,
                 color TEXT DEFAULT '#607D8B',
-                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (parent_id) REFERENCES tags(id) ON DELETE CASCADE
             )
         ''')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)')
+
+        # Migration: add parent_id to existing tags table if missing
+        cursor.execute("PRAGMA table_info(tags)")
+        existing_cols = {col[1] for col in cursor.fetchall()}
+        if 'parent_id' not in existing_cols:
+            try:
+                cursor.execute('ALTER TABLE tags ADD COLUMN parent_id INTEGER REFERENCES tags(id) ON DELETE CASCADE')
+            except sqlite3.OperationalError:
+                pass
+
+        # Create index on parent_id (only after column is guaranteed to exist)
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_tags_parent ON tags(parent_id)')
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS asset_tags (
@@ -444,54 +464,6 @@ class SchemaManager:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_entity_metadata_uuid ON entity_metadata(entity_uuid)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_entity_metadata_field ON entity_metadata(field_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_entity_metadata_type ON entity_metadata(entity_type)')
-
-    def _create_asset_audit_table(self, cursor: sqlite3.Cursor):
-        """
-        Create asset_audit_log table for studio audit trail.
-
-        This table tracks all asset lifecycle events when Studio Mode is enabled.
-        It's append-only and should never be modified after creation.
-        """
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS asset_audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-                -- What asset
-                asset_uuid TEXT NOT NULL,
-                version_group_id TEXT,
-                version_label TEXT,
-                variant_name TEXT DEFAULT 'Base',
-
-                -- What happened
-                action TEXT NOT NULL,
-                action_category TEXT,
-
-                -- Who did it
-                actor TEXT NOT NULL,
-                actor_role TEXT DEFAULT '',
-                actor_display_name TEXT,
-
-                -- When
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                -- Details
-                details TEXT,
-                previous_value TEXT,
-                new_value TEXT,
-
-                -- Context
-                source TEXT DEFAULT 'desktop',
-                session_id TEXT
-            )
-        ''')
-
-        # Create indexes for common queries
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_asset ON asset_audit_log(asset_uuid)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_actor ON asset_audit_log(actor)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_action ON asset_audit_log(action)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_timestamp ON asset_audit_log(timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_version_group ON asset_audit_log(version_group_id)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_asset_audit_category ON asset_audit_log(action_category)')
 
     def _create_app_settings_table(self, cursor: sqlite3.Cursor):
         """

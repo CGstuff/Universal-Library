@@ -28,7 +28,6 @@ from PyQt6.QtGui import QAction, QFont, QColor, QIcon
 
 from ..config import Config
 from ..services.database_service import get_database_service
-from ..services.user_service import get_user_service
 from ..services.control_authority import get_control_authority, OperationMode
 from ..events.event_bus import get_event_bus
 
@@ -63,16 +62,13 @@ class FolderTree(QTreeWidget):
         super().__init__(parent)
 
         self._db_service = get_database_service()
-        self._user_service = get_user_service()
         self._control_authority = get_control_authority()
         self._event_bus = get_event_bus()
         self._dragged_folder_item = None  # Track dragged folder
-        self._review_folder_item = None  # Review folder (hidden in standalone mode)
 
         self._setup_tree()
         self._load_folders()
         self._connect_signals()
-        self._update_review_folder_visibility()
 
     def _setup_tree(self):
         """Configure tree widget"""
@@ -101,22 +97,6 @@ class FolderTree(QTreeWidget):
         """Connect internal signals"""
         self.itemSelectionChanged.connect(self._on_selection_changed)
         self.customContextMenuRequested.connect(self._on_context_menu)
-        self._control_authority.mode_changed.connect(self._on_operation_mode_changed)
-
-    def _on_operation_mode_changed(self, mode):
-        """Handle operation mode change - show/hide review folder."""
-        self._update_review_folder_visibility()
-
-    def _update_review_folder_visibility(self):
-        """Update review folder visibility based on operation mode.
-        
-        Review features are visible in Studio and Pipeline modes only,
-        hidden in Standalone mode.
-        """
-        if self._review_folder_item:
-            # Show review folder in Studio or Pipeline mode, hide in Standalone
-            show_review = self._control_authority.get_operation_mode() != OperationMode.STANDALONE
-            self._review_folder_item.setHidden(not show_review)
 
     def _load_folders(self):
         """Load folders from database and create tree"""
@@ -134,9 +114,6 @@ class FolderTree(QTreeWidget):
         # These folders map to physical directories on disk
         # User subfolders under types are virtual (database-only)
         self._create_type_folders()
-
-        # Apply studio mode visibility to review folder
-        self._update_review_folder_visibility()
 
         # Select "All Assets" by default
         if self.topLevelItemCount() > 0:
@@ -168,40 +145,6 @@ class FolderTree(QTreeWidget):
             font = item.font(0)
             font.setBold(True)
             item.setFont(0, font)
-
-        # Review section with child folders (hidden in solo mode)
-        self._review_folder_item = QTreeWidgetItem(self)
-        self._review_folder_item.setText(0, "Review")
-        self._review_folder_item.setData(0, Qt.ItemDataRole.UserRole, {
-            'type': 'virtual_group',
-            'folder_name': 'Review'
-        })
-
-        # Make review parent bold
-        font = self._review_folder_item.font(0)
-        font.setBold(True)
-        self._review_folder_item.setFont(0, font)
-
-        # Review workflow folders (children of Review)
-        review_folders = [
-            (Config.VIRTUAL_FOLDER_NEEDS_REVIEW, "Needs Review"),
-            (Config.VIRTUAL_FOLDER_IN_REVIEW, "In Review"),
-            (Config.VIRTUAL_FOLDER_IN_PROGRESS, "In Progress"),
-            (Config.VIRTUAL_FOLDER_APPROVED, "Approved"),
-            (Config.VIRTUAL_FOLDER_FINAL, "Final"),
-        ]
-
-        for folder_id, folder_name in review_folders:
-            item = QTreeWidgetItem(self._review_folder_item)
-            item.setText(0, folder_name)
-            item.setData(0, Qt.ItemDataRole.UserRole, {
-                'type': 'virtual',
-                'folder_id': folder_id,
-                'folder_name': folder_name
-            })
-
-        # Expand review section by default
-        self._review_folder_item.setExpanded(True)
 
     def _create_type_folders(self):
         """

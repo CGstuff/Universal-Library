@@ -28,7 +28,6 @@ from .asset_folder_repository import AssetFolderRepository
 from .schema_manager import SchemaManager
 from .database_maintenance import DatabaseMaintenance, VERSION_FEATURES
 from .asset_file_ops import AssetFileOps
-from .asset_audit import AssetAudit
 
 
 class DatabaseService:
@@ -70,7 +69,6 @@ class DatabaseService:
         self._schema_manager = None
         self._maintenance = None
         self._file_ops = None
-        self._asset_audit = None
 
         # Initialize schema
         self._init_database()
@@ -124,9 +122,6 @@ class DatabaseService:
             get_asset_folders=self._asset_folders.get_asset_folders,
             remove_asset_from_folder=self._asset_folders.remove_asset_from_folder,
         )
-
-        # Asset audit logging (Studio Mode only)
-        self._asset_audit = AssetAudit(conn)
 
     def _init_database(self):
         """Initialize database schema via SchemaManager."""
@@ -451,33 +446,59 @@ class DatabaseService:
 
     # ==================== TAG OPERATIONS (delegates to TagRepository) ====================
 
-    def create_tag(self, name: str, color: Optional[str] = None) -> Optional[int]:
-        """Create a new tag"""
-        return self._tags.create(name, color)
+    def create_tag(self, name: str, color: Optional[str] = None,
+                   parent_id: Optional[int] = None) -> Optional[int]:
+        """Create a new tag node"""
+        return self._tags.create(name, color, parent_id)
+
+    def create_tag_from_path(self, dot_path: str, color: Optional[str] = None) -> Optional[int]:
+        """Create tag from dot-separated path, auto-creating parents"""
+        return self._tags.create_from_path(dot_path, color)
 
     def get_tag_by_id(self, tag_id: int) -> Optional[Dict[str, Any]]:
-        """Get tag by ID"""
+        """Get tag by ID (includes full_path)"""
         return self._tags.get_by_id(tag_id)
 
     def get_tag_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """Get tag by name"""
+        """Get tag by leaf name"""
         return self._tags.get_by_name(name)
 
+    def get_tag_by_path(self, dot_path: str) -> Optional[Dict[str, Any]]:
+        """Get tag by full dot-separated path"""
+        return self._tags.get_by_path(dot_path)
+
     def get_all_tags_v2(self) -> List[Dict[str, Any]]:
-        """Get all tags (new tag system with colors)"""
+        """Get all tags with full_path, sorted by path"""
         return self._tags.get_all()
 
-    def update_tag(self, tag_id: int, name: Optional[str] = None, color: Optional[str] = None) -> bool:
+    def update_tag(self, tag_id: int, name: Optional[str] = None,
+                   color: Optional[str] = None, parent_id: Optional[int] = -1) -> bool:
         """Update a tag"""
-        return self._tags.update(tag_id, name, color)
+        return self._tags.update(tag_id, name, color, parent_id)
 
     def delete_tag(self, tag_id: int) -> bool:
-        """Delete a tag"""
+        """Delete a tag and descendants"""
         return self._tags.delete(tag_id)
 
     def get_or_create_tag(self, name: str, color: Optional[str] = None) -> Optional[int]:
-        """Get existing tag or create new one"""
+        """Get existing tag or create new one (flat compat)"""
         return self._tags.get_or_create(name, color)
+
+    def get_or_create_tag_path(self, dot_path: str, color: Optional[str] = None) -> Optional[int]:
+        """Get existing tag by path or create full chain"""
+        return self._tags.get_or_create_path(dot_path, color)
+
+    def get_tag_children(self, parent_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get direct children of a tag (root tags if None)"""
+        return self._tags.get_children(parent_id)
+
+    def get_tag_descendants(self, tag_id: int) -> List[Dict[str, Any]]:
+        """Get all descendants of a tag"""
+        return self._tags.get_descendants(tag_id)
+
+    def get_tag_tree(self) -> List[Dict[str, Any]]:
+        """Get full tag tree as nested dicts with 'children'"""
+        return self._tags.get_tree()
 
     def add_tag_to_asset(self, asset_uuid: str, tag_id: int) -> bool:
         """Add a tag to an asset"""
@@ -488,7 +509,7 @@ class DatabaseService:
         return self._tags.remove_tag_from_asset(asset_uuid, tag_id)
 
     def get_asset_tags(self, asset_uuid: str) -> List[Dict[str, Any]]:
-        """Get all tags for an asset"""
+        """Get all tags for an asset (with full_path)"""
         return self._tags.get_asset_tags(asset_uuid)
 
     def set_asset_tags(self, asset_uuid: str, tag_ids: List[int]) -> bool:
@@ -499,16 +520,20 @@ class DatabaseService:
         """Get all asset UUIDs with a specific tag"""
         return self._tags.get_assets_by_tag(tag_id)
 
+    def get_assets_by_tag_semantic(self, tag_id: int) -> List[str]:
+        """Get asset UUIDs matching tag OR any descendant (semantic query)"""
+        return self._tags.get_assets_by_tag_or_descendants(tag_id)
+
     def get_assets_by_tags(self, tag_ids: List[int], match_all: bool = False) -> List[str]:
         """Get asset UUIDs matching tag criteria"""
         return self._tags.get_assets_by_tags(tag_ids, match_all)
 
     def get_tags_with_counts(self) -> List[Dict[str, Any]]:
-        """Get all tags with their usage counts"""
+        """Get all tags with usage counts and full_path"""
         return self._tags.get_tags_with_counts()
 
     def search_tags(self, query: str) -> List[Dict[str, Any]]:
-        """Search tags by name"""
+        """Search tags by name or full path"""
         return self._tags.search_tags(query)
 
     # ==================== ASSET-FOLDER OPERATIONS (delegates to AssetFolderRepository) ====================
@@ -643,66 +668,6 @@ class DatabaseService:
         except Exception as e:
             logger.warning(f"Failed to set app setting {key}: {e}")
             return False
-
-    # ==================== AUDIT LOGGING (Studio Mode only) ====================
-
-    @property
-    def audit(self) -> AssetAudit:
-        """Get the asset audit service for logging actions."""
-        return self._asset_audit
-
-    def log_audit_action(
-        self,
-        asset_uuid: str,
-        action: str,
-        details: dict = None,
-        previous_value: str = None,
-        new_value: str = None,
-        source: str = 'desktop'
-    ) -> Optional[int]:
-        """
-        Log an audit action for an asset.
-
-        This is a convenience method that:
-        - Auto-fills actor from current user
-        - Auto-fills version info from asset
-
-        Args:
-            asset_uuid: UUID of the asset
-            action: Action type (create, update, approve, etc.)
-            details: Additional details dict
-            previous_value: Value before change
-            new_value: Value after change
-            source: Source of action (desktop, blender, api)
-
-        Returns:
-            Log entry ID or None if disabled/failed
-        """
-        # Get asset info for context
-        asset = self._assets.get_by_uuid(asset_uuid)
-        version_group_id = asset.get('version_group_id') if asset else None
-        version_label = asset.get('version_label') if asset else None
-        variant_name = asset.get('variant_name', 'Base') if asset else 'Base'
-
-        return self._asset_audit.log_action(
-            asset_uuid=asset_uuid,
-            action=action,
-            version_group_id=version_group_id,
-            version_label=version_label,
-            variant_name=variant_name,
-            details=details,
-            previous_value=previous_value,
-            new_value=new_value,
-            source=source
-        )
-
-    def get_asset_audit_history(self, asset_uuid: str, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get audit history for an asset."""
-        return self._asset_audit.get_asset_history(asset_uuid, limit)
-
-    def get_audit_activity_summary(self, days: int = 30) -> Dict[str, Any]:
-        """Get audit activity summary for dashboard."""
-        return self._asset_audit.get_activity_summary(days)
 
     def close(self):
         """Close database connections"""

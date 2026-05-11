@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QPixmap, QPalette, QColor
+from ...themes.fonts import Fonts
 
 from ...config import Config
 
@@ -58,12 +59,12 @@ class WelcomePage(QWidget):
             else:
                 # Fallback to text
                 logo_label.setText("UL")
-                logo_label.setFont(QFont("Segoe UI", 36, QFont.Weight.Bold))
+                logo_label.setFont(QFont(Fonts.HEADER_LARGE.family, 36, QFont.Weight.Bold))
                 logo_label.setStyleSheet("color: #0078d4;")
         else:
             # Fallback to text if icon not found
             logo_label.setText("UL")
-            logo_label.setFont(QFont("Segoe UI", 36, QFont.Weight.Bold))
+            logo_label.setFont(QFont(Fonts.HEADER_LARGE.family, 36, QFont.Weight.Bold))
             logo_label.setStyleSheet("color: #0078d4;")
 
         layout.addWidget(logo_label)
@@ -72,7 +73,7 @@ class WelcomePage(QWidget):
 
         # Title
         title = QLabel("Welcome to Universal Library!")
-        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setFont(QFont(Fonts.HEADER.family, 14, QFont.Weight.Bold))
         title.setStyleSheet("color: #0078d4;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -84,7 +85,7 @@ class WelcomePage(QWidget):
             "Universal Library is a tool for organizing, versioning,\n"
             "and managing assets across your Blender projects."
         )
-        desc.setFont(QFont("Segoe UI", 10))
+        desc.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
@@ -92,7 +93,7 @@ class WelcomePage(QWidget):
 
         # Setup line
         setup_line = QLabel("This wizard will help you set up your asset storage location.")
-        setup_line.setFont(QFont("Segoe UI", 10))
+        setup_line.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         setup_line.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(setup_line)
 
@@ -100,7 +101,7 @@ class WelcomePage(QWidget):
 
         # Requirements group box
         req_frame = QGroupBox("What you'll need:")
-        req_frame.setFont(QFont("Segoe UI", 10))
+        req_frame.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         req_layout = QVBoxLayout(req_frame)
         req_layout.setSpacing(5)
         req_layout.setContentsMargins(15, 15, 15, 15)
@@ -113,7 +114,7 @@ class WelcomePage(QWidget):
 
         for req in requirements:
             req_label = QLabel(f"• {req}")
-            req_label.setFont(QFont("Segoe UI", 10))
+            req_label.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
             req_layout.addWidget(req_label)
 
         layout.addWidget(req_frame)
@@ -137,7 +138,7 @@ class LibraryPathPage(QWidget):
 
         # Title
         title = QLabel("Choose Storage Location")
-        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setFont(QFont(Fonts.HEADER.family, 14, QFont.Weight.Bold))
         title.setStyleSheet("color: #0078d4;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
@@ -149,7 +150,7 @@ class LibraryPathPage(QWidget):
             "Select a folder where your assets will be stored.\n"
             "This folder will contain all asset files, thumbnails, and metadata."
         )
-        desc.setFont(QFont("Segoe UI", 10))
+        desc.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
@@ -194,7 +195,7 @@ class LibraryPathPage(QWidget):
 
         # Tips group box
         tips_frame = QGroupBox("Tips:")
-        tips_frame.setFont(QFont("Segoe UI", 10))
+        tips_frame.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         tips_layout = QVBoxLayout(tips_frame)
         tips_layout.setSpacing(5)
         tips_layout.setContentsMargins(15, 15, 15, 15)
@@ -207,7 +208,7 @@ class LibraryPathPage(QWidget):
 
         for tip in tips:
             tip_label = QLabel(f"• {tip}")
-            tip_label.setFont(QFont("Segoe UI", 10))
+            tip_label.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
             tips_layout.addWidget(tip_label)
 
         layout.addWidget(tips_frame)
@@ -266,7 +267,7 @@ class FinishPage(QWidget):
 
         # Title
         title = QLabel("Setup Complete!")
-        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setFont(QFont(Fonts.HEADER.family, 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #4CAF50;")
         layout.addWidget(title)
@@ -275,7 +276,7 @@ class FinishPage(QWidget):
 
         # Summary
         self._summary_label = QLabel()
-        self._summary_label.setFont(QFont("Segoe UI", 10))
+        self._summary_label.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         self._summary_label.setWordWrap(True)
         self._summary_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._summary_label)
@@ -284,7 +285,7 @@ class FinishPage(QWidget):
 
         # Next steps group box
         steps_frame = QGroupBox("Next steps:")
-        steps_frame.setFont(QFont("Segoe UI", 10))
+        steps_frame.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
         steps_layout = QVBoxLayout(steps_frame)
         steps_layout.setSpacing(5)
         steps_layout.setContentsMargins(15, 15, 15, 15)
@@ -298,7 +299,7 @@ class FinishPage(QWidget):
 
         for i, step in enumerate(steps, 1):
             step_label = QLabel(f"{i}. {step}")
-            step_label.setFont(QFont("Segoe UI", 10))
+            step_label.setFont(QFont(Fonts.DEFAULT.family, Fonts.DEFAULT.size))
             steps_layout.addWidget(step_label)
 
         layout.addWidget(steps_frame)

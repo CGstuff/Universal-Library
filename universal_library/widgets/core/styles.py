@@ -46,18 +46,6 @@ class Colors:
     INFO = "#2196F3"             # Informational
     INFO_HOVER = "#42A5F5"
 
-    # Review states (specific meanings)
-    NEEDS_REVIEW = WARNING
-    IN_REVIEW = WARNING
-    IN_PROGRESS = PRIMARY
-    APPROVED = SUCCESS
-    REVIEW_FINAL = FINAL
-
-    # Note states
-    NOTE_OPEN = ERROR
-    NOTE_ADDRESSED = WARNING
-    NOTE_APPROVED = SUCCESS
-
     # Text colors
     TEXT_PRIMARY = "#ffffff"
     TEXT_SECONDARY = "#aaaaaa"
@@ -251,18 +239,6 @@ class BadgeStyles:
             font-weight: bold;
         """
 
-    # Status badges
-    NEEDS_REVIEW = colored.__func__(Colors.NEEDS_REVIEW)
-    IN_REVIEW = colored.__func__(Colors.IN_REVIEW)
-    IN_PROGRESS = colored.__func__(Colors.IN_PROGRESS)
-    APPROVED = colored.__func__(Colors.APPROVED)
-    FINAL = colored.__func__(Colors.FINAL)
-
-    # Note status badges
-    NOTE_OPEN = colored.__func__(Colors.NOTE_OPEN)
-    NOTE_ADDRESSED = colored.__func__(Colors.NOTE_ADDRESSED)
-    NOTE_APPROVED = colored.__func__(Colors.NOTE_APPROVED)
-
     # Version badge
     VERSION = f"""
         background-color: {Colors.BADGE_BG};
@@ -275,19 +251,6 @@ class BadgeStyles:
     # Variant badges
     VARIANT_BASE = colored.__func__(Colors.VARIANT_BASE)
     VARIANT_OTHER = colored.__func__(Colors.VARIANT_OTHER)
-
-    # Cycle type badges (use REVIEW_CYCLE_TYPES colors from config)
-    @staticmethod
-    def cycle_type(color: str) -> str:
-        """Generate a cycle type badge style."""
-        return f"""
-            background-color: {color};
-            color: {Colors.TEXT_PRIMARY};
-            padding: 4px 12px;
-            border-radius: 4px;
-            font-weight: bold;
-            font-size: 12px;
-        """
 
 
 class LabelStyles:

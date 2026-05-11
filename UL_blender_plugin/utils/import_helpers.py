@@ -66,6 +66,7 @@ def import_blend_file(
         # Track existing data to identify what's new
         existing_collections = set(bpy.data.collections.keys())
         existing_objects = set(bpy.data.objects.keys())
+        existing_actions = set(bpy.data.actions.keys())
 
         # Import collections AND objects to preserve hierarchy
         with bpy.data.libraries.load(filepath, link=link) as (data_from, data_to):
@@ -79,6 +80,20 @@ def import_blend_file(
             data_to.materials = data_from.materials[:]
             data_to.cameras = data_from.cameras[:]
             data_to.lights = data_from.lights[:]
+            # Pull in ALL actions stored in the library .blend.
+            # `libraries.load` only follows explicit requests — actions saved
+            # via fake_user but not currently referenced (the picker's
+            # un-attached selections) would otherwise be silently dropped.
+            data_to.actions = data_from.actions[:]
+
+        # Set fake_user on every action we just brought in. The library
+        # author intentionally shipped these (picked in the export dialog),
+        # so we want them to survive subsequent saves of the user's working
+        # file even if they don't immediately get assigned to anything.
+        for name in set(bpy.data.actions.keys()) - existing_actions:
+            action = bpy.data.actions.get(name)
+            if action is not None:
+                action.use_fake_user = True
 
         # Find newly imported collections and objects
         new_collection_names = set(bpy.data.collections.keys()) - existing_collections

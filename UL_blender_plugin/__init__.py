@@ -22,8 +22,8 @@ Usage:
 bl_info = {
     "name": "Universal Library",
     "author": "CGstuff",
-    "version": (1, 0, 0),
-    "blender": (4, 5, 0),
+    "version": (1, 2, 0),
+    "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Asset Library",
     "description": "Asset management for Blender",
     "warning": "",
@@ -42,6 +42,11 @@ from . import properties
 from . import gizmos
 from .utils.library_connection import get_library_connection, set_library_path
 from .utils import icon_loader
+
+# Re-export the gltf user extension class so Blender's io_scene_gltf2 addon
+# discovers it. The addon looks for `glTF2ExportUserExtension` on each
+# enabled addon's top-level module (see io_scene_gltf2/__init__.py).
+from .gltf_action_filter import glTF2ExportUserExtension  # noqa: F401
 
 
 # Queue listener state

@@ -18,8 +18,6 @@ from ..events.event_bus import get_event_bus
 from ..services.database_service import get_database_service
 from ..services.control_authority import get_control_authority
 from ..services.thumbnail_loader import get_thumbnail_loader
-from ..services.screenshot_queue_handler import get_screenshot_queue_handler
-from ..services.review_database import get_review_database
 from ..services.asset_manager import get_asset_manager
 from ..models.asset_list_model import AssetListModel
 from ..models.asset_filter_proxy_model import AssetFilterProxyModel
@@ -74,8 +72,7 @@ class MainWindow(QMainWindow):
         self._event_bus = get_event_bus()
         self._db_service = get_database_service()
         self._thumbnail_loader = get_thumbnail_loader()
-        self._screenshot_queue_handler = get_screenshot_queue_handler()
-        
+
         # Initialize control authority with database service
         self._control_authority = get_control_authority()
         self._control_authority.set_db_service(self._db_service)
@@ -93,7 +90,6 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._load_settings()
         self._load_assets()
-        self._start_screenshot_queue_timer()
 
     def _setup_window(self):
         """Configure window properties"""
@@ -382,10 +378,7 @@ class MainWindow(QMainWindow):
         # Get all assets from database
         assets = self._db_service.get_all_assets()
 
-        # Get review database for comment status
-        review_db = get_review_database()
-
-        # Enrich assets with tags_v2, folders_v2, and comment status
+        # Enrich assets with tags_v2 and folders_v2 (review system removed)
         for asset in assets:
             uuid = asset.get('uuid')
             if uuid:
@@ -395,15 +388,6 @@ class MainWindow(QMainWindow):
                 if not asset['folders_v2'] and asset.get('folder_id'):
                     self._db_service.migrate_asset_to_multi_folder(uuid, asset['folder_id'])
                     asset['folders_v2'] = self._db_service.get_asset_folders(uuid)
-
-                # Enrich with comment/review status
-                version_label = asset.get('version_label', 'v001')
-                # Pass version_group_id for cycle lookup (cycles span all versions in group)
-                version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
-                review_status = review_db.get_review_status(uuid, version_label, version_group_id)
-                asset['has_unresolved_comments'] = review_status.get('unresolved_notes', 0) > 0
-                asset['unresolved_comment_count'] = review_status.get('unresolved_notes', 0)
-                asset['review_state'] = review_status.get('review_state')
 
         # Load into model
         self._asset_model.set_assets(assets)
@@ -423,24 +407,6 @@ class MainWindow(QMainWindow):
         count = len(assets)
         self._status_bar.set_asset_count(count)
         self._status_bar.set_status("Ready")
-
-    def _start_screenshot_queue_timer(self):
-        """Start timer to poll for Blender screenshot requests"""
-        self._screenshot_queue_timer = QTimer(self)
-        self._screenshot_queue_timer.timeout.connect(self._poll_screenshot_queue)
-        self._screenshot_queue_timer.start(2000)  # Poll every 2 seconds
-
-    def _poll_screenshot_queue(self):
-        """Poll for and process pending screenshot requests from Blender"""
-        try:
-            count = self._screenshot_queue_handler.process_all_pending()
-            if count > 0:
-                # Show notification
-                self._status_bar.set_status(
-                    f"Imported {count} screenshot(s) from Blender"
-                )
-        except Exception as e:
-            pass
 
     # ==================== SLOT HANDLERS ====================
 
@@ -611,24 +577,12 @@ class MainWindow(QMainWindow):
         # Reload assets from database
         assets = self._db_service.get_all_assets()
 
-        # Get review database for comment status
-        review_db = get_review_database()
-
-        # Enrich assets with tags_v2, folders_v2, and comment status
+        # Enrich assets with tags_v2 and folders_v2 (review system removed)
         for asset in assets:
             uuid = asset.get('uuid')
             if uuid:
                 asset['tags_v2'] = self._db_service.get_asset_tags(uuid)
                 asset['folders_v2'] = self._db_service.get_asset_folders(uuid)
-
-                # Enrich with comment/review status
-                version_label = asset.get('version_label', 'v001')
-                # Pass version_group_id for cycle lookup (cycles span all versions in group)
-                version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
-                review_status = review_db.get_review_status(uuid, version_label, version_group_id)
-                asset['has_unresolved_comments'] = review_status.get('unresolved_notes', 0) > 0
-                asset['unresolved_comment_count'] = review_status.get('unresolved_notes', 0)
-                asset['review_state'] = review_status.get('review_state')
 
         self._asset_model.set_assets(assets)
 
@@ -896,8 +850,7 @@ class MainWindow(QMainWindow):
             f"\n\nTotal: {total_versions} version(s) across {total_variants} variant(s)\n\n"
             "This includes:\n"
             "  - All version history\n"
-            "  - All files on disk (USD, .blend, thumbnails)\n"
-            "  - All reviews, screenshots, and draw-overs\n\n"
+            "  - All files on disk (USD, .blend, thumbnails)\n\n"
             "This action cannot be undone!"
         )
 
@@ -1012,24 +965,12 @@ class MainWindow(QMainWindow):
         # Reload assets to reflect changes
         assets = self._db_service.get_all_assets()
 
-        # Get review database for comment status
-        review_db = get_review_database()
-
-        # Enrich assets with tags_v2, folders_v2, and comment status
+        # Enrich assets with tags_v2 and folders_v2 (review system removed)
         for asset in assets:
             uuid = asset.get('uuid')
             if uuid:
                 asset['tags_v2'] = self._db_service.get_asset_tags(uuid)
                 asset['folders_v2'] = self._db_service.get_asset_folders(uuid)
-
-                # Enrich with comment/review status
-                version_label = asset.get('version_label', 'v001')
-                # Pass version_group_id for cycle lookup (cycles span all versions in group)
-                version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
-                review_status = review_db.get_review_status(uuid, version_label, version_group_id)
-                asset['has_unresolved_comments'] = review_status.get('unresolved_notes', 0) > 0
-                asset['unresolved_comment_count'] = review_status.get('unresolved_notes', 0)
-                asset['review_state'] = review_status.get('review_state')
 
         self._asset_model.set_assets(assets)
 
@@ -1044,21 +985,6 @@ class MainWindow(QMainWindow):
 
         # Full refresh from database (includes is_latest, thumbnail_path, folders_v2, tags_v2)
         self._asset_model.refresh_asset(uuid)
-
-        # Also refresh review status
-        review_db = get_review_database()
-        asset = self._asset_model.get_asset_by_uuid(uuid)
-        if asset:
-            version_label = asset.get('version_label', 'v001')
-            version_group_id = asset.get('version_group_id') or asset.get('asset_id') or uuid
-            review_status = review_db.get_review_status(uuid, version_label, version_group_id)
-
-            updates = {
-                'has_unresolved_comments': review_status.get('unresolved_notes', 0) > 0,
-                'unresolved_comment_count': review_status.get('unresolved_notes', 0),
-                'review_state': review_status.get('review_state')
-            }
-            self._asset_model.update_asset(uuid, updates)
 
         # Re-filter in case is_latest changed (affects show_only_latest filter)
         self._proxy_model.invalidateFilter()
@@ -1087,10 +1013,6 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent):
         """Handle window close"""
-        # Stop screenshot queue timer
-        if hasattr(self, '_screenshot_queue_timer'):
-            self._screenshot_queue_timer.stop()
-
         self._save_settings()
         event.accept()
 

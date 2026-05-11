@@ -14,6 +14,54 @@ import bpy
 from typing import Dict, Any, List, Optional, Set
 
 
+def collect_bbox_metadata(objects: List[bpy.types.Object]) -> Dict[str, Any]:
+    """
+    Compute overall world-space bounding box dimensions for a set of objects.
+
+    Uses obj.bound_box × obj.matrix_world to get accurate world-space extents
+    across all geometric objects, then returns the overall width/depth/height.
+
+    Args:
+        objects: List of Blender objects to measure
+
+    Returns:
+        Dict with bbox_x (width), bbox_y (depth), bbox_z (height) in Blender units,
+        or None values if no measurable geometry found.
+    """
+    import mathutils
+
+    all_corners = []
+    measurable_types = {'MESH', 'CURVE', 'SURFACE', 'CURVES', 'ARMATURE',
+                        'LIGHT', 'CAMERA', 'GPENCIL', 'GREASEPENCIL'}
+
+    for obj in objects:
+        if obj.type not in measurable_types:
+            continue
+        try:
+            bbox = obj.bound_box
+            matrix = obj.matrix_world
+            for corner in bbox:
+                all_corners.append(matrix @ mathutils.Vector(corner))
+        except Exception:
+            continue
+
+    if not all_corners:
+        return {'bbox_x': None, 'bbox_y': None, 'bbox_z': None}
+
+    min_x = min(c.x for c in all_corners)
+    max_x = max(c.x for c in all_corners)
+    min_y = min(c.y for c in all_corners)
+    max_y = max(c.y for c in all_corners)
+    min_z = min(c.z for c in all_corners)
+    max_z = max(c.z for c in all_corners)
+
+    return {
+        'bbox_x': round(max_x - min_x, 4),
+        'bbox_y': round(max_y - min_y, 4),
+        'bbox_z': round(max_z - min_z, 4),
+    }
+
+
 def collect_mesh_metadata(objects: List[bpy.types.Object]) -> Dict[str, Any]:
     """
     Collect metadata from mesh objects.
@@ -694,6 +742,9 @@ def collect_all_metadata(objects: List[bpy.types.Object], asset_type: str) -> Di
     """
     metadata = {}
 
+    # Always collect bounding box (used by World Library for placement)
+    metadata.update(collect_bbox_metadata(objects))
+
     # Categorize objects
     meshes = [obj for obj in objects if obj.type == 'MESH']
     armatures = [obj for obj in objects if obj.type == 'ARMATURE']
@@ -738,6 +789,7 @@ def collect_all_metadata(objects: List[bpy.types.Object], asset_type: str) -> Di
 
 
 __all__ = [
+    'collect_bbox_metadata',
     'collect_mesh_metadata',
     'collect_rig_metadata',
     'collect_animation_metadata',

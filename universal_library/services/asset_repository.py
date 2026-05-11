@@ -128,89 +128,6 @@ class AssetRepository(BaseRepository):
         Returns:
             Asset database ID or None on error
         """
-        try:
-            with self._transaction() as conn:
-                cursor = conn.cursor()
-
-                tags = asset_data.get('tags', [])
-                tags_json = json.dumps(tags) if isinstance(tags, list) else tags
-
-                now = datetime.now()
-
-                # Handle versioning - use version_group_id as uuid if not provided
-                version_group_id = asset_data.get('version_group_id') or asset_data.get('uuid')
-                version = asset_data.get('version', 1)
-                version_label = asset_data.get('version_label', f'v{version:03d}')
-
-                # Handle variant system - use version_group_id as asset_id if not provided
-                asset_id = asset_data.get('asset_id') or version_group_id
-                variant_name = asset_data.get('variant_name', 'Base')
-                variant_source_uuid = asset_data.get('variant_source_uuid')
-
-                cursor.execute('''
-                    INSERT INTO assets (
-                        uuid, name, description, folder_id, asset_type,
-                        usd_file_path, blend_backup_path, thumbnail_path, preview_path,
-                        file_size_mb, has_materials, has_skeleton, has_animations,
-                        polygon_count, material_count, tags, author, source_application,
-                        status, version, version_label, version_group_id, is_latest,
-                        asset_id, variant_name, variant_source_uuid,
-                        created_date, modified_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    asset_data.get('uuid'),
-                    asset_data.get('name'),
-                    asset_data.get('description', ''),
-                    asset_data.get('folder_id'),
-                    asset_data.get('asset_type'),
-                    asset_data.get('usd_file_path'),
-                    asset_data.get('blend_backup_path'),
-                    asset_data.get('thumbnail_path'),
-                    asset_data.get('preview_path'),
-                    asset_data.get('file_size_mb'),
-                    asset_data.get('has_materials', 0),
-                    asset_data.get('has_skeleton', 0),
-                    asset_data.get('has_animations', 0),
-                    asset_data.get('polygon_count'),
-                    asset_data.get('material_count'),
-                    tags_json,
-                    asset_data.get('author', ''),
-                    asset_data.get('source_application', 'Blender'),
-                    asset_data.get('status', 'wip'),
-                    version,
-                    version_label,
-                    version_group_id,
-                    asset_data.get('is_latest', 1),
-                    asset_id,
-                    variant_name,
-                    variant_source_uuid,
-                    now,
-                    now
-                ))
-
-                row_id = cursor.lastrowid
-
-                # Note: EAV write moved outside transaction to avoid lock
-                return row_id, asset_data.get('uuid')  # Return tuple for post-commit EAV write
-
-        except Exception:
-            return None, None
-
-    def add(self, asset_data: Dict[str, Any]) -> Optional[int]:
-        """
-        Add asset to database
-
-        Args:
-            asset_data: Asset metadata dict with keys:
-                - uuid (required)
-                - name (required)
-                - folder_id (required)
-                - asset_type (required)
-                - ... other optional fields
-
-        Returns:
-            Asset database ID or None on error
-        """
         result = self._add_core(asset_data)
         if result is None:
             return None
@@ -491,27 +408,30 @@ class AssetRepository(BaseRepository):
             with self._transaction() as conn:
                 cursor = conn.cursor()
 
-                # Temporarily disable foreign key checks to avoid constraint issues
+                # Temporarily disable foreign key checks to avoid constraint issues.
+                # Wrapped in try/finally so FKs are always restored — without this,
+                # an exception below would leave FKs disabled on this thread's
+                # long-lived connection for the rest of the session.
                 cursor.execute('PRAGMA foreign_keys = OFF')
-
-                # Delete from asset_tags junction table
                 try:
-                    cursor.execute('DELETE FROM asset_tags WHERE asset_uuid = ?', (uuid,))
-                except Exception as e:
-                    logger.debug(f"Could not delete asset_tags for {uuid}: {e}")
+                    # Delete from asset_tags junction table
+                    try:
+                        cursor.execute('DELETE FROM asset_tags WHERE asset_uuid = ?', (uuid,))
+                    except Exception as e:
+                        logger.debug(f"Could not delete asset_tags for {uuid}: {e}")
 
-                # Delete from asset_folders junction table
-                try:
-                    cursor.execute('DELETE FROM asset_folders WHERE asset_uuid = ?', (uuid,))
-                except Exception as e:
-                    logger.debug(f"Could not delete asset_folders for {uuid}: {e}")
+                    # Delete from asset_folders junction table
+                    try:
+                        cursor.execute('DELETE FROM asset_folders WHERE asset_uuid = ?', (uuid,))
+                    except Exception as e:
+                        logger.debug(f"Could not delete asset_folders for {uuid}: {e}")
 
-                # Now delete the asset itself
-                cursor.execute('DELETE FROM assets WHERE uuid = ?', (uuid,))
-                deleted = cursor.rowcount > 0
-
-                # Re-enable foreign key checks
-                cursor.execute('PRAGMA foreign_keys = ON')
+                    # Now delete the asset itself
+                    cursor.execute('DELETE FROM assets WHERE uuid = ?', (uuid,))
+                    deleted = cursor.rowcount > 0
+                finally:
+                    # Re-enable foreign key checks unconditionally
+                    cursor.execute('PRAGMA foreign_keys = ON')
         except Exception as e:
             import traceback
             traceback.print_exc()

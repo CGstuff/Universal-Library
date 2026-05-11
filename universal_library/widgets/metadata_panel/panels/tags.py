@@ -1,44 +1,207 @@
 """
-TagsWidget - Tag management for assets.
+TagsWidget - Tag assignment for assets via checkbox tree popup.
+
+Click "+ Add Tags" to open a popup showing the tag hierarchy as a
+collapsible tree with checkboxes. Tags display as full dot-paths
+(e.g. Tree.Deciduous.Oak) on the asset.
 """
 
 import json
 from typing import List, Dict, Any, Optional
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QGroupBox, QPushButton, QComboBox, QSizePolicy
+    QGroupBox, QPushButton, QSizePolicy, QLineEdit,
+    QTreeWidget, QTreeWidgetItem, QFrame,
 )
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt, QPoint
+from PyQt6.QtGui import QColor, QIcon, QPixmap
+
+
+class _TagTreePopup(QFrame):
+    """
+    Popup with a searchable, collapsible checkbox tree of tags.
+    Starts collapsed — user expands categories they care about.
+    """
+
+    tag_toggled = pyqtSignal(int, bool)  # tag_id, checked
+
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("""
+            _TagTreePopup {
+                background-color: #2a2a2e;
+                border: 1px solid #555;
+            }
+        """)
+        self.setMinimumWidth(320)
+        self.setMaximumHeight(420)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        # Search filter
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("Search tags…")
+        self._filter.setFixedHeight(26)
+        self._filter.setClearButtonEnabled(True)
+        self._filter.textChanged.connect(self._on_filter)
+        layout.addWidget(self._filter)
+
+        # Tree
+        self._tree = QTreeWidget()
+        self._tree.setHeaderHidden(True)
+        self._tree.setRootIsDecorated(True)
+        self._tree.setAnimated(False)
+        self._tree.setIndentation(18)
+        self._tree.setStyleSheet("""
+            QTreeWidget {
+                background-color: #2a2a2e;
+                border: none;
+                outline: none;
+            }
+            QTreeWidget::item {
+                padding: 2px 0;
+            }
+            QTreeWidget::item:hover {
+                background-color: #353538;
+            }
+        """)
+        self._tree.itemChanged.connect(self._on_item_changed)
+        layout.addWidget(self._tree, 1)
+
+        self._updating = False
+
+    def populate(self, tree_data: List[Dict], assigned_ids: set):
+        """Fill tree from tag hierarchy. Starts collapsed."""
+        self._updating = True
+        self._tree.clear()
+
+        def add_nodes(parent_widget, nodes):
+            for node in nodes:
+                item = QTreeWidgetItem(parent_widget)
+                item.setText(0, node['name'])
+                item.setData(0, Qt.ItemDataRole.UserRole, node['id'])
+                item.setData(0, Qt.ItemDataRole.UserRole + 1,
+                             node.get('full_path', node['name']))
+
+                # Tooltip shows full path
+                item.setToolTip(0, node.get('full_path', node['name']))
+
+                # Color dot
+                color = node.get('color', '#607D8B')
+                px = QPixmap(12, 12)
+                px.fill(QColor(color))
+                item.setIcon(0, QIcon(px))
+
+                # Checkbox
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                checked = node['id'] in assigned_ids
+                item.setCheckState(
+                    0,
+                    Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked,
+                )
+
+                if node.get('children'):
+                    add_nodes(item, node['children'])
+
+        add_nodes(self._tree, tree_data)
+
+        # Start collapsed — user expands what they need
+        self._tree.collapseAll()
+
+        # But expand nodes that have checked children (so assigned tags are visible)
+        self._expand_checked(self._tree.invisibleRootItem())
+
+        self._updating = False
+        self._filter.clear()
+
+    def _expand_checked(self, item: QTreeWidgetItem) -> bool:
+        """Expand parent nodes that contain checked children. Returns True if any checked."""
+        has_checked = False
+
+        for i in range(item.childCount()):
+            child = item.child(i)
+            child_checked = child.checkState(0) == Qt.CheckState.Checked
+            descendant_checked = self._expand_checked(child)
+
+            if child_checked or descendant_checked:
+                has_checked = True
+
+        if has_checked and item is not self._tree.invisibleRootItem():
+            item.setExpanded(True)
+
+        return has_checked
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int):
+        if self._updating:
+            return
+        tag_id = item.data(0, Qt.ItemDataRole.UserRole)
+        if tag_id is None:
+            return
+        checked = item.checkState(0) == Qt.CheckState.Checked
+        self.tag_toggled.emit(tag_id, checked)
+
+    def _on_filter(self, text: str):
+        """Show items matching the query + their parent chain."""
+        query = text.strip().lower()
+
+        def filter_item(item: QTreeWidgetItem) -> bool:
+            name = item.text(0).lower()
+            path = (item.data(0, Qt.ItemDataRole.UserRole + 1) or '').lower()
+            self_match = query in name or query in path
+
+            child_match = False
+            for i in range(item.childCount()):
+                if filter_item(item.child(i)):
+                    child_match = True
+
+            visible = self_match or child_match or not query
+            item.setHidden(not visible)
+
+            if (child_match or self_match) and query:
+                item.setExpanded(True)
+
+            return visible
+
+        root = self._tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            filter_item(root.child(i))
+
+    def showAt(self, global_pos: QPoint):
+        self.show()
+        self.move(global_pos)
+        self._filter.setFocus()
 
 
 class TagsWidget(QWidget):
     """
-    Widget for managing asset tags.
+    Asset tag management widget.
 
-    Features:
-    - Display current tags as clickable pills
-    - Dropdown to add new tags
-    - Remove tags by clicking X
+    Displays assigned tags as full dot-path pills (e.g. Tree.Deciduous.Oak).
+    "+ Add Tags" opens a collapsible checkbox tree for quick assignment.
 
     Signals:
-        tag_added: Emitted when tag added (uuid, tag_id)
-        tag_removed: Emitted when tag removed (uuid, tag_id)
-        tags_changed: Emitted when tags change (uuid, [tag_ids])
+        tag_added(uuid, tag_id)
+        tag_removed(uuid, tag_id)
+        tags_changed(uuid, [tag_ids])
     """
 
-    tag_added = pyqtSignal(str, int)  # uuid, tag_id
-    tag_removed = pyqtSignal(str, int)  # uuid, tag_id
-    tags_changed = pyqtSignal(str, list)  # uuid, [tag_ids]
+    tag_added = pyqtSignal(str, int)
+    tag_removed = pyqtSignal(str, int)
+    tags_changed = pyqtSignal(str, list)
 
     def __init__(self, db_service, parent=None):
         super().__init__(parent)
         self._db_service = db_service
         self._current_uuid: Optional[str] = None
         self._current_tag_ids: List[int] = []
+        self._popup: Optional[_TagTreePopup] = None
         self._setup_ui()
 
     def _setup_ui(self):
-        """Setup UI components."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -46,183 +209,189 @@ class TagsWidget(QWidget):
         group_layout = QVBoxLayout(self._group)
         group_layout.setSpacing(4)
 
-        # Tag pills container
-        self._tags_container = QWidget()
-        self._tags_flow = QHBoxLayout(self._tags_container)
-        self._tags_flow.setContentsMargins(0, 0, 0, 0)
-        self._tags_flow.setSpacing(4)
-        group_layout.addWidget(self._tags_container)
+        # Pills container
+        self._pills_widget = QWidget()
+        self._pills_layout = QVBoxLayout(self._pills_widget)
+        self._pills_layout.setContentsMargins(0, 0, 0, 0)
+        self._pills_layout.setSpacing(2)
+        group_layout.addWidget(self._pills_widget)
 
-        # Add tag dropdown
-        add_tag_row = QHBoxLayout()
-        self._tag_dropdown = QComboBox()
-        self._tag_dropdown.setFixedHeight(24)
-        self._tag_dropdown.setPlaceholderText("Select tag to add...")
-        self._tag_dropdown.activated.connect(self._on_tag_selected)
-        add_tag_row.addWidget(self._tag_dropdown, 1)
-        group_layout.addLayout(add_tag_row)
+        # Add Tags button
+        self._add_btn = QPushButton("+ Add Tags")
+        self._add_btn.setFixedHeight(26)
+        self._add_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #333;
+                border: 1px dashed #555;
+                color: #999;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                border-color: #888;
+                color: #ccc;
+            }
+        """)
+        self._add_btn.clicked.connect(self._on_add_clicked)
+        group_layout.addWidget(self._add_btn)
 
         layout.addWidget(self._group)
 
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def set_asset(self, uuid: str):
-        """Set current asset and refresh display."""
+        """Set current asset and refresh pills."""
         self._current_uuid = uuid
-
-        # Get tags for this asset
         tags_v2 = self._db_service.get_asset_tags(uuid)
-        self._update_display(tags_v2)
-        self._refresh_dropdown()
-
-    def _update_display(self, tags_data):
-        """Update tags display with clickable tag pills."""
-        # Clear existing tags
-        while self._tags_flow.count():
-            item = self._tags_flow.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        self._current_tag_ids = []
-
-        # Handle new tags_v2 format (list of dicts)
-        if isinstance(tags_data, list) and tags_data and isinstance(tags_data[0], dict):
-            for tag in tags_data[:10]:
-                tag_id = tag.get('id')
-                tag_name = tag.get('name', 'Unknown')
-                tag_color = tag.get('color', '#607D8B')
-
-                self._current_tag_ids.append(tag_id)
-
-                # Create clickable tag button with X
-                tag_btn = QPushButton(f"{tag_name} \u00d7")
-                tag_btn.setToolTip(f"Click to remove '{tag_name}'")
-                tag_btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-                tag_btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: {tag_color};
-                        color: white;
-                        padding: 2px 6px;
-                        border-radius: 0px;
-                        border: none;
-                        font-size: 11px;
-                    }}
-                    QPushButton:hover {{
-                        background-color: #c0392b;
-                    }}
-                """)
-                tag_btn.clicked.connect(lambda checked, tid=tag_id: self._on_remove_tag(tid))
-                self._tags_flow.addWidget(tag_btn)
-
-            self._tags_flow.addStretch()
-            return
-
-        # Handle legacy string/JSON format
-        if not tags_data:
-            no_tags = QLabel("No tags")
-            no_tags.setStyleSheet("color: #606060;")
-            self._tags_flow.addWidget(no_tags)
-            return
-
-        try:
-            tags = json.loads(tags_data) if isinstance(tags_data, str) else tags_data
-            if not tags:
-                no_tags = QLabel("No tags")
-                no_tags.setStyleSheet("color: #606060;")
-                self._tags_flow.addWidget(no_tags)
-                return
-
-            for tag in tags[:10]:
-                tag_label = QLabel(tag)
-                tag_label.setStyleSheet("""
-                    QLabel {
-                        background-color: #404040;
-                        color: #e0e0e0;
-                        padding: 2px 6px;
-                        border-radius: 0px;
-                        font-size: 11px;
-                    }
-                """)
-                self._tags_flow.addWidget(tag_label)
-        except (json.JSONDecodeError, TypeError):
-            no_tags = QLabel("No tags")
-            no_tags.setStyleSheet("color: #606060;")
-            self._tags_flow.addWidget(no_tags)
-
-    def _on_tag_selected(self, index: int):
-        """Handle tag selection from dropdown."""
-        if not self._current_uuid or index < 0:
-            return
-
-        tag_id = self._tag_dropdown.itemData(index)
-        if not tag_id:
-            return
-
-        if tag_id not in self._current_tag_ids:
-            if self._db_service.add_tag_to_asset(self._current_uuid, tag_id):
-                self._current_tag_ids.append(tag_id)
-
-                # Refresh display
-                tags_v2 = self._db_service.get_asset_tags(self._current_uuid)
-                self._update_display(tags_v2)
-                self._refresh_dropdown()
-
-                # Emit signals
-                self.tag_added.emit(self._current_uuid, tag_id)
-                self.tags_changed.emit(self._current_uuid, self._current_tag_ids.copy())
-
-        # Reset dropdown
-        self._tag_dropdown.setCurrentIndex(-1)
-
-    def _on_remove_tag(self, tag_id: int):
-        """Handle removing a tag from the asset."""
-        if not self._current_uuid:
-            return
-
-        if self._db_service.remove_tag_from_asset(self._current_uuid, tag_id):
-            if tag_id in self._current_tag_ids:
-                self._current_tag_ids.remove(tag_id)
-
-            # Refresh display
-            tags_v2 = self._db_service.get_asset_tags(self._current_uuid)
-            self._update_display(tags_v2)
-            self._refresh_dropdown()
-
-            # Emit signals
-            self.tag_removed.emit(self._current_uuid, tag_id)
-            self.tags_changed.emit(self._current_uuid, self._current_tag_ids.copy())
-
-    def _refresh_dropdown(self):
-        """Refresh tag dropdown with available tags."""
-        self._tag_dropdown.clear()
-
-        all_tags = self._db_service.get_all_tags_v2()
-
-        # Filter out tags already on this asset
-        available_tags = [
-            tag for tag in all_tags
-            if tag.get('id') not in self._current_tag_ids
-        ]
-
-        if not available_tags:
-            self._tag_dropdown.setEnabled(False)
-            self._tag_dropdown.setPlaceholderText("No more tags available")
-        else:
-            self._tag_dropdown.setEnabled(True)
-            self._tag_dropdown.setPlaceholderText("Select tag to add...")
-            for tag in available_tags:
-                self._tag_dropdown.addItem(tag.get('name', 'Unknown'), tag.get('id'))
-
-        self._tag_dropdown.setCurrentIndex(-1)
+        self._rebuild_pills(tags_v2)
 
     def clear(self):
-        """Clear display."""
         self._current_uuid = None
         self._current_tag_ids = []
-        self._update_display(None)
+        self._rebuild_pills(None)
 
     @property
     def current_tag_ids(self) -> List[int]:
-        """Get current tag IDs."""
         return self._current_tag_ids.copy()
+
+    # ------------------------------------------------------------------
+    # Popup
+    # ------------------------------------------------------------------
+
+    def _on_add_clicked(self):
+        if not self._current_uuid:
+            return
+
+        tree_data = self._db_service.get_tag_tree()
+        if not tree_data:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, "No Tags",
+                "No tags exist yet.\n"
+                "Create tags in Settings → Tags first.",
+            )
+            return
+
+        self._popup = _TagTreePopup(self)
+        self._popup.tag_toggled.connect(self._on_tag_toggled)
+        self._popup.populate(tree_data, set(self._current_tag_ids))
+
+        pos = self._add_btn.mapToGlobal(QPoint(0, self._add_btn.height()))
+        self._popup.showAt(pos)
+
+    def _on_tag_toggled(self, tag_id: int, checked: bool):
+        if not self._current_uuid:
+            return
+
+        if checked and tag_id not in self._current_tag_ids:
+            self._db_service.add_tag_to_asset(self._current_uuid, tag_id)
+            self._current_tag_ids.append(tag_id)
+            self.tag_added.emit(self._current_uuid, tag_id)
+        elif not checked and tag_id in self._current_tag_ids:
+            self._db_service.remove_tag_from_asset(self._current_uuid, tag_id)
+            self._current_tag_ids.remove(tag_id)
+            self.tag_removed.emit(self._current_uuid, tag_id)
+
+        # Refresh pills
+        tags_v2 = self._db_service.get_asset_tags(self._current_uuid)
+        self._rebuild_pills(tags_v2)
+        self.tags_changed.emit(self._current_uuid, self._current_tag_ids.copy())
+
+    # ------------------------------------------------------------------
+    # Pill display
+    # ------------------------------------------------------------------
+
+    def _rebuild_pills(self, tags_data):
+        """Rebuild the pill display from tag data."""
+        # Clear old pills
+        self._clear_pills_layout()
+        self._current_tag_ids = []
+
+        # v2 format: list of dicts with full_path
+        if isinstance(tags_data, list) and tags_data and isinstance(tags_data[0], dict):
+            row = self._new_pill_row()
+            row_width = 0
+            max_width = max(self._pills_widget.width() - 8, 240)
+
+            for tag in tags_data[:30]:
+                tag_id = tag.get('id')
+                full_path = tag.get('full_path', tag.get('name', '?'))
+                tag_color = tag.get('color', '#607D8B')
+                self._current_tag_ids.append(tag_id)
+
+                pill = self._make_pill(full_path, tag_color, tag_id)
+                pill_width = pill.sizeHint().width()
+
+                # Wrap to next row if needed
+                if row_width > 0 and row_width + pill_width + 4 > max_width:
+                    row.addStretch()
+                    row = self._new_pill_row()
+                    row_width = 0
+
+                row.addWidget(pill)
+                row_width += pill_width + 4
+
+            row.addStretch()
+            return
+
+        # Empty state
+        lbl = QLabel("No tags assigned")
+        lbl.setStyleSheet("color: #555; font-size: 11px; padding: 2px;")
+        self._pills_layout.addWidget(lbl)
+
+    def _new_pill_row(self) -> QHBoxLayout:
+        """Add a new horizontal row to the pills layout and return it."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        self._pills_layout.addLayout(row)
+        return row
+
+    def _make_pill(self, full_path: str, color: str, tag_id: int) -> QPushButton:
+        """Colored pill showing the full dot path. Click to remove."""
+        pill = QPushButton(f"{full_path}  ×")
+        pill.setToolTip(f"Click to remove: {full_path}")
+        pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        pill.setCursor(Qt.CursorShape.PointingHandCursor)
+        pill.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {color};
+                color: white;
+                padding: 2px 8px;
+                border: none;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #c0392b;
+            }}
+        """)
+        pill.clicked.connect(lambda: self._on_remove_tag(tag_id))
+        return pill
+
+    def _on_remove_tag(self, tag_id: int):
+        if not self._current_uuid:
+            return
+        if self._db_service.remove_tag_from_asset(self._current_uuid, tag_id):
+            if tag_id in self._current_tag_ids:
+                self._current_tag_ids.remove(tag_id)
+            tags_v2 = self._db_service.get_asset_tags(self._current_uuid)
+            self._rebuild_pills(tags_v2)
+            self.tag_removed.emit(self._current_uuid, tag_id)
+            self.tags_changed.emit(self._current_uuid, self._current_tag_ids.copy())
+
+    def _clear_pills_layout(self):
+        """Remove all widgets and sub-layouts from the pills layout."""
+        while self._pills_layout.count():
+            item = self._pills_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                sub = item.layout()
+                while sub.count():
+                    child = sub.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
 
 
 __all__ = ['TagsWidget']

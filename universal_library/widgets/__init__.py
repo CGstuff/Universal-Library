@@ -18,7 +18,7 @@ from .controllers import BulkEditController
 from .settings import SettingsDialog, StorageTab, BlenderTab, AppearanceTab
 
 # Dialogs
-from .dialogs import ScanProgressDialog, AboutDialog, VersionHistoryDialog, AssetHistoryDialog, show_asset_history_dialog
+from .dialogs import ScanProgressDialog, AboutDialog, VersionHistoryDialog
 
 __all__ = [
     # Core widgets
@@ -39,6 +39,4 @@ __all__ = [
     'ScanProgressDialog',
     'AboutDialog',
     'VersionHistoryDialog',
-    'AssetHistoryDialog',
-    'show_asset_history_dialog',
 ]

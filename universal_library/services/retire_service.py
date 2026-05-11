@@ -18,7 +18,6 @@ from typing import Dict, List, Optional, Tuple, Any, Set
 
 from ..config import Config
 from .database_service import get_database_service
-from .user_service import get_user_service
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,6 @@ class RetireService:
 
     def __init__(self):
         self._db_service = get_database_service()
-        self._user_service = get_user_service()
 
     def retire_asset(self, uuid: str) -> Tuple[bool, str]:
         """
@@ -81,8 +79,8 @@ class RetireService:
         if not versions_to_retire:
             versions_to_retire = [asset]
 
-        # Get current user for audit trail
-        current_user = self._user_service.get_current_username()
+        # User system removed — retired_by stays empty.
+        current_user = ''
         retire_time = datetime.now()
 
         try:

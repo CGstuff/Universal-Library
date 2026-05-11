@@ -113,64 +113,6 @@ class Variantable(ABC):
         return db.get_variant_count(self.asset_id)
 
 
-class Reviewable(ABC):
-    """
-    Mixin for entities that support review workflow.
-
-    Enables review cycles with states like needs_review, in_review,
-    in_progress, approved, and final.
-
-    Depends on: Versionable, Variantable (for identifiers)
-    """
-
-    @property
-    def review_state(self) -> Optional[str]:
-        """Get current review state (needs_review, in_review, etc.)."""
-        return self.get('review_state')
-
-    @property
-    def is_in_review(self) -> bool:
-        """Check if entity is in active review workflow."""
-        state = self.review_state
-        return state in ('needs_review', 'in_review', 'in_progress', 'approved')
-
-    @property
-    def is_review_final(self) -> bool:
-        """Check if review is marked final."""
-        return self.review_state == 'final'
-
-    def get_active_cycle(self) -> Optional[Dict[str, Any]]:
-        """
-        Get active review cycle for this entity.
-
-        Returns:
-            Review cycle dict or None if no active cycle
-        """
-        from ...services.review_state_manager import get_review_state_manager
-        state_manager = get_review_state_manager()
-
-        # Use asset_id for cycle lookup (shared across variants)
-        asset_id = self.get('asset_id') or self.get('version_group_id') or self.uuid
-        return state_manager.get_active_cycle(asset_id)
-
-    def get_review_notes_count(self) -> Dict[str, int]:
-        """
-        Get review note counts by status.
-
-        Returns:
-            Dict with 'open', 'addressed', 'approved', 'total' counts
-        """
-        from ...services.review_database import get_review_database
-        review_db = get_review_database()
-
-        asset_id = self.get('asset_id') or self.get('version_group_id') or self.uuid
-        cycle = self.get_active_cycle()
-
-        if cycle:
-            return review_db.get_cycle_note_counts(cycle['id'])
-        return review_db.get_note_status_counts(self.uuid, self.version_label)
-
-
 class Taggable(ABC):
     """
     Mixin for entities that support tagging.
@@ -289,7 +231,6 @@ class Folderable(ABC):
 __all__ = [
     'Versionable',
     'Variantable',
-    'Reviewable',
     'Taggable',
     'Folderable',
 ]

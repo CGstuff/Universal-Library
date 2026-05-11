@@ -4,7 +4,6 @@ AssetEntity - Concrete entity implementation for assets.
 Combines all behaviors needed for asset management:
 - Versionable: Version tracking and history
 - Variantable: Variant support for different versions
-- Reviewable: Review workflow integration
 - Taggable: Tag-based categorization
 - Folderable: Folder organization
 """
@@ -12,17 +11,16 @@ Combines all behaviors needed for asset management:
 from typing import Optional, List, Dict, Any
 
 from .base import Entity, EntityDefinition
-from .behaviors import Versionable, Variantable, Reviewable, Taggable, Folderable
+from .behaviors import Versionable, Variantable, Taggable, Folderable
 
 
-class AssetEntity(Entity, Versionable, Variantable, Reviewable, Taggable, Folderable):
+class AssetEntity(Entity, Versionable, Variantable, Taggable, Folderable):
     """
     Asset entity with full behavior composition.
 
     Represents a USD asset in the library with support for:
     - Versioning (v001, v002, etc.)
     - Variants (Base, Heavy_Armor, etc.)
-    - Review workflow (needs_review, approved, etc.)
     - Tags and folders for organization
 
     Core fields (stored in assets table):
@@ -41,7 +39,7 @@ class AssetEntity(Entity, Versionable, Variantable, Reviewable, Taggable, Folder
     _definition = EntityDefinition(
         name='asset',
         table_name='assets',
-        behaviors=['versionable', 'variantable', 'reviewable', 'taggable', 'folderable'],
+        behaviors=['versionable', 'variantable', 'taggable', 'folderable'],
         core_fields=[
             # Identity
             'uuid', 'name', 'description', 'folder_id', 'asset_type',

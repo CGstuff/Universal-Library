@@ -49,11 +49,6 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
         self._cold_storage_only: bool = False  # Filter for cold storage assets
         self._base_only: bool = False  # Filter for base assets (variant_name == 'Base')
         self._variants_only: bool = False  # Filter for variant assets (variant_name != 'Base')
-        self._needs_review_only: bool = False  # Filter for review_state == 'needs_review'
-        self._in_review_only: bool = False  # Filter for review_state == 'in_review'
-        self._in_progress_only: bool = False  # Filter for review_state == 'in_progress'
-        self._approved_only: bool = False  # Filter for review_state == 'approved'
-        self._final_only: bool = False  # Filter for review_state == 'final'
         self._show_only_latest: bool = True  # Show only latest versions by default
 
         # Sort configuration
@@ -100,18 +95,11 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             self._cold_storage_only = False
             self._base_only = False
             self._variants_only = False
-            self._needs_review_only = False
-            self._in_review_only = False
-            self._in_progress_only = False
-            self._approved_only = False
-            self._final_only = False
 
         def has_any_virtual_flag():
             return (self._folder_id is not None or self._favorites_only or
                     self._recent_only or self._cold_storage_only or
-                    self._base_only or self._variants_only or
-                    self._needs_review_only or self._in_review_only or
-                    self._in_progress_only or self._approved_only or self._final_only)
+                    self._base_only or self._variants_only)
 
         # Handle virtual folders
         if folder_id == Config.VIRTUAL_FOLDER_ALL:
@@ -148,36 +136,6 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             if not self._variants_only:
                 clear_virtual_flags()
                 self._variants_only = True
-                changed = True
-        elif folder_id == Config.VIRTUAL_FOLDER_NEEDS_REVIEW:
-            # Needs Review virtual folder - show assets with review_state == 'needs_review'
-            if not self._needs_review_only:
-                clear_virtual_flags()
-                self._needs_review_only = True
-                changed = True
-        elif folder_id == Config.VIRTUAL_FOLDER_IN_REVIEW:
-            # In Review virtual folder - show assets with review_state == 'in_review'
-            if not self._in_review_only:
-                clear_virtual_flags()
-                self._in_review_only = True
-                changed = True
-        elif folder_id == Config.VIRTUAL_FOLDER_IN_PROGRESS:
-            # In Progress virtual folder - show assets with review_state == 'in_progress'
-            if not self._in_progress_only:
-                clear_virtual_flags()
-                self._in_progress_only = True
-                changed = True
-        elif folder_id == Config.VIRTUAL_FOLDER_APPROVED:
-            # Approved virtual folder - show assets with review_state == 'approved'
-            if not self._approved_only:
-                clear_virtual_flags()
-                self._approved_only = True
-                changed = True
-        elif folder_id == Config.VIRTUAL_FOLDER_FINAL:
-            # Final virtual folder - show assets with review_state == 'final'
-            if not self._final_only:
-                clear_virtual_flags()
-                self._final_only = True
                 changed = True
         else:
             # Regular folder
@@ -439,26 +397,6 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             self._cold_storage_only = False
             changed = True
 
-        if self._needs_review_only:
-            self._needs_review_only = False
-            changed = True
-
-        if self._in_review_only:
-            self._in_review_only = False
-            changed = True
-
-        if self._in_progress_only:
-            self._in_progress_only = False
-            changed = True
-
-        if self._approved_only:
-            self._approved_only = False
-            changed = True
-
-        if self._final_only:
-            self._final_only = False
-            changed = True
-
         if changed:
             self.invalidateFilter()
 
@@ -502,23 +440,6 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             if is_cold:
                 return False
 
-        # Review state filters (filter by review workflow state)
-        review_state = source_model.data(index, AssetRole.ReviewStateRole)
-        if self._needs_review_only:
-            if review_state != 'needs_review':
-                return False
-        if self._in_review_only:
-            if review_state != 'in_review':
-                return False
-        if self._in_progress_only:
-            if review_state != 'in_progress':
-                return False
-        if self._approved_only:
-            if review_state != 'approved':
-                return False
-        if self._final_only:
-            if review_state != 'final':
-                return False
 
         # Base/Variants filter
         if self._base_only or self._variants_only:
@@ -759,38 +680,8 @@ class AssetFilterProxyModel(QSortFilterProxyModel):
             self._filter_statuses or
             self._favorites_only or
             self._recent_only or
-            self._cold_storage_only or
-            self._needs_review_only or
-            self._in_review_only or
-            self._in_progress_only or
-            self._approved_only or
-            self._final_only
+            self._cold_storage_only
         )
-
-    def is_needs_review_only(self) -> bool:
-        """Check if needs review only filter is active"""
-        return self._needs_review_only
-
-    def is_in_review_only(self) -> bool:
-        """Check if in review only filter is active"""
-        return self._in_review_only
-
-    def is_in_progress_only(self) -> bool:
-        """Check if in progress only filter is active"""
-        return self._in_progress_only
-
-    def is_approved_only(self) -> bool:
-        """Check if approved only filter is active"""
-        return self._approved_only
-
-    def is_final_only(self) -> bool:
-        """Check if final only filter is active"""
-        return self._final_only
-
-    def is_any_review_filter(self) -> bool:
-        """Check if any review filter is active"""
-        return (self._needs_review_only or self._in_review_only or
-                self._in_progress_only or self._approved_only or self._final_only)
 
 
 __all__ = ['AssetFilterProxyModel']

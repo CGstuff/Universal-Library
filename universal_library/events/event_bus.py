@@ -93,17 +93,6 @@ class EventBus(QObject):
     # Bulk operation completion
     bulk_operation_completed = pyqtSignal(str, int)  # operation_name, success_count
 
-    # ==================== REVIEW SIGNALS ====================
-    # Review system
-    review_opened = pyqtSignal(str, str)  # asset_uuid, version_label
-    review_note_added = pyqtSignal(int)   # note_id
-    review_note_resolved = pyqtSignal(int)  # note_id
-    review_note_deleted = pyqtSignal(int)  # note_id
-    review_session_resolved = pyqtSignal(str)  # session_id (all notes resolved)
-    screenshot_uploaded = pyqtSignal(int)  # screenshot_id
-    screenshot_deleted = pyqtSignal(int)  # screenshot_id
-    annotation_saved = pyqtSignal(str, str)  # asset_uuid, screenshot_name
-
     # ==================== UI STATE SIGNALS ====================
     # Status messages
     status_message = pyqtSignal(str)  # message

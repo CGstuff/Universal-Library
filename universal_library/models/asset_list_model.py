@@ -90,13 +90,6 @@ class AssetRole(IntEnum):
     # Complete data dict
     AssetDataRole = Qt.ItemDataRole.UserRole + 100
 
-    # Comment/Review indicators
-    HasUnresolvedCommentsRole = Qt.ItemDataRole.UserRole + 110
-    UnresolvedCommentCountRole = Qt.ItemDataRole.UserRole + 111
-
-    # Review workflow state
-    ReviewStateRole = Qt.ItemDataRole.UserRole + 112  # 'needs_review', 'in_review', 'in_progress', 'approved', 'final', or None
-
 
 class AssetListModel(QAbstractListModel):
     """
@@ -421,15 +414,6 @@ class AssetListModel(QAbstractListModel):
 
         elif role == AssetRole.AssetDataRole:
             return asset
-
-        elif role == AssetRole.HasUnresolvedCommentsRole:
-            return asset.get('has_unresolved_comments', False)
-
-        elif role == AssetRole.UnresolvedCommentCountRole:
-            return asset.get('unresolved_comment_count', 0)
-
-        elif role == AssetRole.ReviewStateRole:
-            return asset.get('review_state')  # 'needs_review', 'in_review', 'in_progress', 'approved', 'final', or None
 
         return None
 
