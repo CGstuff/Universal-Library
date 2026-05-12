@@ -121,6 +121,43 @@ def _get_version_from_library_users(lib) -> Optional[str]:
     return None
 
 
+def _normalize_filepath(filepath: str) -> str:
+    """Normalize a Blender library filepath for stable comparison.
+
+    Resolves Blender's // relative paths and any case differences so
+    string equality is reliable across calls. Returns the original
+    string unchanged if normalization fails (defensive — we never
+    want stable-key resolution to crash).
+    """
+    try:
+        return str(Path(bpy.path.abspath(filepath)))
+    except (TypeError, ValueError):
+        return filepath
+
+
+def _resolve_lib_by_filepath(filepath_str: str):
+    """Look up the live bpy.types.Library matching `filepath_str`, if any.
+
+    This is the cornerstone of the stale-reference fix. The rest of this
+    module passes filepath strings (stable keys that never invalidate)
+    instead of Library references, and uses this helper to fetch the
+    live Library exactly when needed (for `lib.filepath = ...`, `lib.reload()`,
+    or for passing to `_get_version_from_library_users`). If Blender has
+    purged the library between calls, we return None and the caller skips
+    that entry instead of crashing.
+    """
+    target = _normalize_filepath(filepath_str)
+    for lib in bpy.data.libraries:
+        try:
+            if _normalize_filepath(lib.filepath) == target:
+                return lib
+        except ReferenceError:
+            # This entry in bpy.data.libraries got invalidated mid-iteration —
+            # skip it and try the next one rather than aborting the whole search.
+            continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Save / Load / Clear original paths (scene custom property, JSON)
 # ---------------------------------------------------------------------------
@@ -137,28 +174,32 @@ def _save_original_paths(ual_libs):
 
     FIX: When library is pointing to .current.blend, detect the actual
     version from object metadata and save the versioned file path instead.
+
+    Takes the new (filepath_str, base_stem, rep_dir) tuple shape from
+    `find_ual_libraries()`. Resolves the live Library object only when
+    `_get_version_from_library_users` actually needs it.
     """
     scene = bpy.context.scene
     existing = _load_original_paths()
 
     changed = False
-    for lib, base_stem, rep_dir in ual_libs:
-        abs_path = Path(bpy.path.abspath(lib.filepath))
-        abs_path_str = str(abs_path)
+    for filepath_str, base_stem, rep_dir in ual_libs:
+        abs_path = Path(filepath_str)
 
-        if abs_path_str not in existing:
-            original_path = abs_path_str
+        if filepath_str not in existing:
+            original_path = filepath_str
 
             # If currently pointing to .current.blend, use versioned file from metadata
             if abs_path.stem.endswith('.current'):
-                version_label = _get_version_from_library_users(lib)
+                lib = _resolve_lib_by_filepath(filepath_str)
+                version_label = _get_version_from_library_users(lib) if lib is not None else None
                 if version_label:
                     # Build versioned path: Sword.v002.blend
                     versioned = rep_dir / f"{base_stem}.{version_label}.blend"
                     if versioned.exists():
                         original_path = str(versioned)
 
-            existing[abs_path_str] = original_path
+            existing[filepath_str] = original_path
             changed = True
 
     if changed:
@@ -232,16 +273,21 @@ def _clear_original_paths(filepaths=None):
 # Pre-computed library-to-UUID mapping (for UUID filtering)
 # ---------------------------------------------------------------------------
 
-def _build_library_uuid_map() -> Dict['bpy.types.Library', Set[str]]:
+def _build_library_uuid_map() -> Dict[str, Set[str]]:
     """
-    Build mapping of library -> set of UUIDs that use it.
+    Build mapping of library filepath -> set of UUIDs that use it.
 
-    Must be called BEFORE any swaps, as lib.reload() can invalidate
-    obj.data.library references.
+    Keyed by normalized filepath strings (NOT by Library refs) so the map
+    remains valid even if Blender invalidates an underlying Library RNA
+    between this call and downstream use. The caller looks up by the same
+    filepath strings carried in `ual_libs`.
+
+    Must still be called BEFORE any swaps, since lib.reload() will then
+    invalidate the next round's obj.data.library references.
 
     Only considers INSTANCE objects (empties with instance_collection).
     """
-    lib_to_uuids = defaultdict(set)
+    lib_to_uuids: Dict[str, Set[str]] = defaultdict(set)
 
     for obj in bpy.data.objects:
         obj_uuid = obj.get('ual_uuid')
@@ -270,8 +316,14 @@ def _build_library_uuid_map() -> Dict['bpy.types.Library', Set[str]]:
             if col_obj.data and hasattr(col_obj.data, 'library') and col_obj.data.library:
                 libs_used.add(col_obj.data.library)
 
+        # Convert refs to filepath strings at insertion time, while the
+        # refs are still guaranteed valid (we just read them above).
         for lib in libs_used:
-            lib_to_uuids[lib].add(obj_uuid)
+            try:
+                fp = _normalize_filepath(lib.filepath)
+            except ReferenceError:
+                continue
+            lib_to_uuids[fp].add(obj_uuid)
 
     return dict(lib_to_uuids)
 
@@ -378,9 +430,14 @@ def _generate_nothing_blend(target_path: Path, asset_name: str):
 # Object-to-library mapping (for selected-only mode)
 # ---------------------------------------------------------------------------
 
-def get_libraries_for_objects(objects) -> Set:
+def get_libraries_for_objects(objects) -> Set[str]:
     """
-    Map selected objects to their linked library references.
+    Map selected objects to their linked library filepath strings.
+
+    Returns normalized filepath strings (stable across RNA invalidation),
+    suitable for passing as `filter_filepaths=` to `swap_to_representation`
+    / `restore_to_original`. Use `_resolve_lib_by_filepath` if you need
+    the live Library object.
 
     Uses multiple strategies to find the library:
     1. Instance collection library (LINK+INSTANCE mode)
@@ -389,49 +446,61 @@ def get_libraries_for_objects(objects) -> Set:
     4. Collection membership
     5. UAL metadata fallback
     """
-    libs = set()
+    filepaths: Set[str] = set()
+
+    def _add(lib):
+        if lib is None:
+            return False
+        try:
+            filepaths.add(_normalize_filepath(lib.filepath))
+            return True
+        except ReferenceError:
+            return False
 
     for obj in objects:
         found = False
 
         # Strategy 1: Instance collection library
         if obj.instance_collection and obj.instance_collection.library:
-            libs.add(obj.instance_collection.library)
-            found = True
+            if _add(obj.instance_collection.library):
+                found = True
 
         # Strategy 2: Direct library or override library
         if obj.library:
-            libs.add(obj.library)
-            found = True
+            if _add(obj.library):
+                found = True
         elif obj.override_library and obj.override_library.reference and obj.override_library.reference.library:
-            libs.add(obj.override_library.reference.library)
-            found = True
+            if _add(obj.override_library.reference.library):
+                found = True
 
         # Strategy 3: Data block library
         if obj.data:
             if hasattr(obj.data, 'library') and obj.data.library:
-                libs.add(obj.data.library)
-                found = True
+                if _add(obj.data.library):
+                    found = True
             elif hasattr(obj.data, 'override_library') and obj.data.override_library:
                 ref = obj.data.override_library.reference
                 if ref and hasattr(ref, 'library') and ref.library:
-                    libs.add(ref.library)
-                    found = True
+                    if _add(ref.library):
+                        found = True
 
         # Strategy 4: Collection membership
         if not found:
             for col in obj.users_collection:
                 if col.library:
-                    libs.add(col.library)
-                    found = True
-                    break
+                    if _add(col.library):
+                        found = True
+                        break
 
         # Strategy 5: UAL metadata fallback
         if not found:
             asset_name = obj.get("ual_asset_name")
             if asset_name:
                 for lib in bpy.data.libraries:
-                    lib_path = Path(bpy.path.abspath(lib.filepath))
+                    try:
+                        lib_path = Path(_normalize_filepath(lib.filepath))
+                    except ReferenceError:
+                        continue
                     lib_stem = lib_path.stem
                     for suffix in REPRESENTATION_SUFFIXES:
                         if lib_stem.endswith(suffix):
@@ -439,17 +508,17 @@ def get_libraries_for_objects(objects) -> Set:
                             break
                     lib_base_name = _get_base_name_from_stem(lib_stem)
                     if lib_stem == asset_name or lib_base_name == asset_name:
-                        libs.add(lib)
+                        _add(lib)
                         break
 
-    return libs
+    return filepaths
 
 
 # ---------------------------------------------------------------------------
 # Core: find UAL libraries
 # ---------------------------------------------------------------------------
 
-def find_ual_libraries(filter_libs=None) -> List[Tuple]:
+def find_ual_libraries(filter_filepaths=None) -> List[Tuple[str, str, Path]]:
     """
     Find all Blender libraries that belong to Universal Asset Library.
 
@@ -457,16 +526,30 @@ def find_ual_libraries(filter_libs=None) -> List[Tuple]:
     - .current.blend, .proxy.blend, .render.blend, .nothing.blend
     - regular .blend (when a .current.blend sibling exists on disk)
 
+    Returns filepath strings (stable across Blender RNA invalidation),
+    NOT live Library references. Use `_resolve_lib_by_filepath()` to
+    fetch the live Library only when you need to mutate it.
+
+    Args:
+        filter_filepaths: Optional set of normalized filepath strings.
+                          If provided, only libraries whose normalized
+                          filepath is in this set are returned.
+
     Returns:
-        List of (bpy.types.Library, base_stem, rep_dir) tuples.
+        List of (filepath_str, base_stem, rep_dir) tuples.
     """
     ual_libs = []
 
     for lib in bpy.data.libraries:
-        if filter_libs is not None and lib not in filter_libs:
+        try:
+            filepath_str = _normalize_filepath(lib.filepath)
+        except ReferenceError:
             continue
 
-        abs_path = Path(bpy.path.abspath(lib.filepath))
+        if filter_filepaths is not None and filepath_str not in filter_filepaths:
+            continue
+
+        abs_path = Path(filepath_str)
         stem = abs_path.stem
 
         matched = False
@@ -475,7 +558,7 @@ def find_ual_libraries(filter_libs=None) -> List[Tuple]:
                 stem_without_suffix = stem[: -len(suffix)]
                 base_stem = _get_base_name_from_stem(stem_without_suffix)
                 rep_dir = abs_path.parent
-                ual_libs.append((lib, base_stem, rep_dir))
+                ual_libs.append((filepath_str, base_stem, rep_dir))
                 matched = True
                 break
 
@@ -483,7 +566,7 @@ def find_ual_libraries(filter_libs=None) -> List[Tuple]:
             base_stem = _get_base_name_from_stem(stem)
             rep_dir = _find_rep_dir(abs_path, stem)
             if rep_dir is not None:
-                ual_libs.append((lib, base_stem, rep_dir))
+                ual_libs.append((filepath_str, base_stem, rep_dir))
 
     return ual_libs
 
@@ -492,7 +575,7 @@ def find_ual_libraries(filter_libs=None) -> List[Tuple]:
 # Core: swap to representation
 # ---------------------------------------------------------------------------
 
-def swap_to_representation(representation: str, filter_libs=None, filter_uuids=None, skip_shared=False) -> Tuple[int, int, List[str]]:
+def swap_to_representation(representation: str, filter_filepaths=None, filter_uuids=None, skip_shared=False) -> Tuple[int, int, List[str]]:
     """
     Swap UAL library links to a different representation.
 
@@ -501,7 +584,9 @@ def swap_to_representation(representation: str, filter_libs=None, filter_uuids=N
 
     Args:
         representation: 'proxy', 'render', or 'nothing'
-        filter_libs: Optional set of bpy.types.Library references.
+        filter_filepaths: Optional set of normalized filepath strings.
+                          Library is matched by `_normalize_filepath(lib.filepath)`.
+                          Use this instead of holding live Library refs across calls.
         filter_uuids: Optional set of UUID strings.
         skip_shared: If True, skip libraries shared by UUIDs not in filter_uuids.
 
@@ -517,7 +602,7 @@ def swap_to_representation(representation: str, filter_libs=None, filter_uuids=N
     if not target_suffix:
         return (0, 0, [f"Unknown representation: {representation}"])
 
-    ual_libs = find_ual_libraries(filter_libs=filter_libs)
+    ual_libs = find_ual_libraries(filter_filepaths=filter_filepaths)
 
     if not ual_libs:
         return (0, 0, ["No UAL libraries found"])
@@ -532,15 +617,15 @@ def swap_to_representation(representation: str, filter_libs=None, filter_uuids=N
 
     lib_uuid_map = None
     if filter_uuids:
+        # Map is keyed by filepath strings — see _build_library_uuid_map.
         lib_uuid_map = _build_library_uuid_map()
 
-    for lib, base_stem, rep_dir in ual_libs:
-        abs_path = Path(bpy.path.abspath(lib.filepath))
-        abs_path_str = str(abs_path)
+    for filepath_str, base_stem, rep_dir in ual_libs:
+        abs_path = Path(filepath_str)
 
         # UUID filtering
         if filter_uuids and lib_uuid_map is not None:
-            lib_uuids = lib_uuid_map.get(lib, set())
+            lib_uuids = lib_uuid_map.get(filepath_str, set())
             matching = lib_uuids.intersection(filter_uuids)
             if not matching:
                 skipped += 1
@@ -587,13 +672,24 @@ def swap_to_representation(representation: str, filter_libs=None, filter_uuids=N
             used_targets.add(target_str)
             continue
 
-        old_name = lib.name
+        # Resolve the live Library RIGHT BEFORE we mutate it. If Blender
+        # purged it between find_ual_libraries() and now, skip with warning
+        # instead of crashing with ReferenceError.
+        lib = _resolve_lib_by_filepath(filepath_str)
+        if lib is None:
+            warnings.append(f"{base_stem}: library no longer in scene, skipped")
+            skipped += 1
+            continue
+
         try:
             lib.filepath = str(target_path)
             lib.reload()
             swapped += 1
             used_targets.add(target_str)
-            _update_saved_key(abs_path_str, target_str)
+            _update_saved_key(filepath_str, target_str)
+        except ReferenceError:
+            warnings.append(f"{base_stem}: library invalidated during swap, skipped")
+            skipped += 1
         except Exception as e:
             msg = f"Failed to swap {base_stem}: {e}"
             warnings.append(msg)
@@ -605,19 +701,24 @@ def swap_to_representation(representation: str, filter_libs=None, filter_uuids=N
 # Restore to original paths
 # ---------------------------------------------------------------------------
 
-def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) -> Tuple[int, int, List[str]]:
+def restore_to_original(filter_filepaths=None, filter_uuids=None, skip_shared=False) -> Tuple[int, int, List[str]]:
     """
     Restore libraries to their original paths (before any representation swap).
 
     Reads saved paths from scene custom property. Each library is matched by
     its CURRENT filepath (the key in the saved dict).
 
+    Args:
+        filter_filepaths: Optional set of normalized filepath strings.
+        filter_uuids: Optional set of UUID strings.
+        skip_shared: If True, skip libraries shared by UUIDs not in filter_uuids.
+
     Returns:
         Tuple of (restored_count, skipped_count, warnings_list)
     """
     saved_paths = _load_original_paths()
 
-    ual_libs = find_ual_libraries(filter_libs=filter_libs)
+    ual_libs = find_ual_libraries(filter_filepaths=filter_filepaths)
     if not ual_libs:
         return (0, 0, ["No UAL libraries found"])
 
@@ -631,14 +732,12 @@ def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) 
     if filter_uuids:
         lib_uuid_map = _build_library_uuid_map()
 
-    for lib, base_stem, rep_dir in ual_libs:
-        lib_name = lib.name
-        abs_path = Path(bpy.path.abspath(lib.filepath))
-        abs_path_str = str(abs_path)
+    for filepath_str, base_stem, rep_dir in ual_libs:
+        abs_path = Path(filepath_str)
 
         # UUID filtering
         if filter_uuids and lib_uuid_map is not None:
-            lib_uuids = lib_uuid_map.get(lib, set())
+            lib_uuids = lib_uuid_map.get(filepath_str, set())
             matching = lib_uuids.intersection(filter_uuids)
             if not matching:
                 skipped += 1
@@ -651,7 +750,7 @@ def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) 
                     skipped += 1
                     continue
 
-        orig_path_str = saved_paths.get(abs_path_str)
+        orig_path_str = saved_paths.get(filepath_str)
 
         if not orig_path_str:
             skipped += 1
@@ -659,8 +758,8 @@ def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) 
 
         target_path = Path(orig_path_str)
 
-        if abs_path_str == orig_path_str:
-            restored_keys.append(abs_path_str)
+        if filepath_str == orig_path_str:
+            restored_keys.append(filepath_str)
             continue
 
         if not target_path.exists():
@@ -673,11 +772,21 @@ def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) 
         if stem.endswith(NOTHING_SUFFIX) and "._ul" in stem:
             nothing_temps.append(abs_path)
 
+        # Resolve the live Library at the last possible moment.
+        lib = _resolve_lib_by_filepath(filepath_str)
+        if lib is None:
+            warnings.append(f"{base_stem}: library no longer in scene, skipped")
+            skipped += 1
+            continue
+
         try:
             lib.filepath = str(target_path)
             lib.reload()
             restored += 1
-            restored_keys.append(abs_path_str)
+            restored_keys.append(filepath_str)
+        except ReferenceError:
+            warnings.append(f"{base_stem}: library invalidated during restore, skipped")
+            skipped += 1
         except Exception as e:
             msg = f"Failed to restore {base_stem}: {e}"
             warnings.append(msg)
@@ -699,12 +808,12 @@ def restore_to_original(filter_libs=None, filter_uuids=None, skip_shared=False) 
 # Swap info (for panel display)
 # ---------------------------------------------------------------------------
 
-def get_swap_info(filter_libs=None) -> Dict[str, dict]:
+def get_swap_info(filter_filepaths=None) -> Dict[str, dict]:
     """
     Get information about available representation swaps for UAL libraries.
 
     Returns:
-        Dict mapping library name -> {
+        Dict mapping filepath_str -> {
             'current_path': str,
             'has_proxy': bool,
             'has_render': bool,
@@ -713,10 +822,13 @@ def get_swap_info(filter_libs=None) -> Dict[str, dict]:
             'base_stem': str,
             'rep_dir': str,
         }
+
+    Keys are filepath strings (stable). If you need a Library name for
+    display, resolve the live ref via `_resolve_lib_by_filepath(key)`.
     """
     info = {}
-    for lib, base_stem, rep_dir in find_ual_libraries(filter_libs=filter_libs):
-        abs_path = Path(bpy.path.abspath(lib.filepath))
+    for filepath_str, base_stem, rep_dir in find_ual_libraries(filter_filepaths=filter_filepaths):
+        abs_path = Path(filepath_str)
         stem = abs_path.stem
 
         # Detect active representation
@@ -735,8 +847,8 @@ def get_swap_info(filter_libs=None) -> Dict[str, dict]:
         render_path = rep_dir / f"{base_stem}{RENDER_SUFFIX}.blend"
         nothing_path = rep_dir / f"{base_stem}{NOTHING_SUFFIX}.blend"
 
-        info[lib.name] = {
-            'current_path': lib.filepath,
+        info[filepath_str] = {
+            'current_path': filepath_str,
             'has_proxy': proxy_path.exists(),
             'has_render': render_path.exists(),
             'has_nothing': nothing_path.exists(),
@@ -818,12 +930,12 @@ class UAL_OT_swap_representation_selected(Operator):
 
         if not selected_uuids:
             # Fallback: if no UUIDs, use library-based filtering
-            libs = get_libraries_for_objects(context.selected_objects)
-            if not libs:
+            lib_filepaths = get_libraries_for_objects(context.selected_objects)
+            if not lib_filepaths:
                 self.report({'WARNING'}, "No UAL libraries found for selected objects")
                 return {'CANCELLED'}
             swapped, skipped, warnings = swap_to_representation(
-                self.representation, filter_libs=libs
+                self.representation, filter_filepaths=lib_filepaths
             )
         else:
             swapped, skipped, warnings = swap_to_representation(
@@ -893,11 +1005,11 @@ class UAL_OT_restore_representation_selected(Operator):
                 selected_uuids.add(obj['ual_uuid'])
 
         if not selected_uuids:
-            libs = get_libraries_for_objects(context.selected_objects)
-            if not libs:
+            lib_filepaths = get_libraries_for_objects(context.selected_objects)
+            if not lib_filepaths:
                 self.report({'WARNING'}, "No UAL libraries found for selected objects")
                 return {'CANCELLED'}
-            restored, skipped, warnings = restore_to_original(filter_libs=libs)
+            restored, skipped, warnings = restore_to_original(filter_filepaths=lib_filepaths)
         else:
             restored, skipped, warnings = restore_to_original(filter_uuids=selected_uuids, skip_shared=True)
 

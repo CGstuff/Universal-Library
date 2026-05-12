@@ -12,6 +12,22 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QPixmap
 
+
+# M6: License options. Stored as the short code; the dropdown shows a
+# human label. "Custom" lets the user type a license that isn't on the
+# list (e.g. a studio-specific EULA reference).
+_LICENSE_CHOICES = [
+    ("", "—"),
+    ("CC0", "CC0 (Public Domain)"),
+    ("CC-BY", "CC-BY"),
+    ("CC-BY-SA", "CC-BY-SA"),
+    ("CC-BY-NC", "CC-BY-NC"),
+    ("MIT", "MIT"),
+    ("GPL-3.0", "GPL-3.0"),
+    ("Proprietary", "Proprietary"),
+    ("Custom", "Custom..."),
+]
+
 from ...config import Config
 from ...events.event_bus import get_event_bus
 from ...events.entity_events import get_entity_event_bus
@@ -137,6 +153,9 @@ class MetadataPanel(QWidget):
         desc_layout.addWidget(self._description_label)
         self._layout.addWidget(self._desc_group)
 
+        # M6: Attribution section (license / copyright / author)
+        self._setup_attribution_section()
+
         # Tags widget
         self._tags_widget = TagsWidget(self._db_service)
         self._tags_widget.tags_changed.connect(
@@ -250,6 +269,62 @@ class MetadataPanel(QWidget):
         # Add to main layout (initially hidden)
         self._dynamic_container.hide()
         self._layout.addWidget(self._dynamic_container)
+
+    def _setup_attribution_section(self):
+        """M6: License / Copyright / Author display (READ-ONLY).
+
+        Attribution is baked in at export time from the Blender addon's
+        Preferences → Attribution Defaults (overrideable per-export in the
+        export dialog). The app shows it but doesn't let you change it —
+        editable attribution would be theater: anyone could rewrite license
+        terms or authorship after the fact. To change, re-export from
+        Blender (creates a new version with new attribution).
+        """
+        self._attr_group = QGroupBox("Attribution")
+        attr_layout = QVBoxLayout(self._attr_group)
+        attr_layout.setSpacing(4)
+
+        def _make_row(label_text: str) -> QLabel:
+            row = QHBoxLayout()
+            key = QLabel(label_text)
+            key.setStyleSheet("color: #888;")
+            key.setFixedWidth(80)
+            row.addWidget(key)
+            value = QLabel("—")
+            value.setWordWrap(True)
+            value.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            row.addWidget(value, 1)
+            attr_layout.addLayout(row)
+            return value
+
+        self._license_value = _make_row("License:")
+        self._copyright_value = _make_row("Copyright:")
+        self._author_value = _make_row("Author:")
+
+        hint = QLabel("Set at export. Re-export from Blender to change.")
+        hint.setStyleSheet("color: #666; font-size: 10px; font-style: italic;")
+        attr_layout.addWidget(hint)
+
+        self._layout.addWidget(self._attr_group)
+
+    def _populate_attribution_fields(self, asset: Dict[str, Any]):
+        """Render the three attribution fields as read-only text."""
+        license_val = (asset.get('license') or '').strip()
+        copyright_val = (asset.get('copyright') or '').strip()
+        author_val = (asset.get('author') or '').strip()
+
+        # License: prefer the human label for known codes, fall back to
+        # the raw stored string for custom values.
+        label_by_code = {code: label for code, label in _LICENSE_CHOICES}
+        if license_val and license_val in label_by_code:
+            self._license_value.setText(label_by_code[license_val])
+        else:
+            self._license_value.setText(license_val if license_val else "—")
+
+        self._copyright_value.setText(copyright_val if copyright_val else "—")
+        self._author_value.setText(author_val if author_val else "—")
 
     def _setup_import_section(self):
         """Setup import settings section."""
@@ -524,6 +599,9 @@ class MetadataPanel(QWidget):
         description = asset.get('description', '')
         self._description_label.setText(description if description else '-')
 
+        # M6: Attribution
+        self._populate_attribution_fields(asset)
+
         # Tags and folders
         self._tags_widget.set_asset(uuid)
         self._folders_widget.set_asset(uuid)
@@ -596,6 +674,10 @@ class MetadataPanel(QWidget):
         self._dynamic_renderer.clear()
         self._dynamic_container.hide()
         self._description_label.setText("-")
+        # M6: clear attribution display labels.
+        self._license_value.setText("—")
+        self._copyright_value.setText("—")
+        self._author_value.setText("—")
         self._tags_widget.clear()
         self._folders_widget.clear()
 
@@ -805,7 +887,17 @@ class MetadataPanel(QWidget):
             self._enlarge_dialog.activateWindow()
             return
         self._enlarge_dialog = EnlargedViewerDialog(glb_path, asset_name, self)
+        # Dialog has WA_DeleteOnClose — clear our reference when Qt
+        # destroys it, otherwise next reopen would test isVisible() on a
+        # dangling pointer and use-after-free.
+        self._enlarge_dialog.destroyed.connect(self._on_enlarge_dialog_destroyed)
         self._enlarge_dialog.show()
+
+    def _on_enlarge_dialog_destroyed(self):
+        """Called when the enlarged-viewer dialog is destroyed (close button
+        or WA_DeleteOnClose). Drop our reference so the next enlarge
+        request creates a fresh dialog instead of poking the dead one."""
+        self._enlarge_dialog = None
 
     def get_import_method(self) -> str:
         """Get import method — always BLEND."""

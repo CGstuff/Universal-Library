@@ -22,7 +22,7 @@ Usage:
 bl_info = {
     "name": "Universal Library",
     "author": "CGstuff",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (5, 0, 0),
     "location": "View3D > Sidebar > Asset Library",
     "description": "Asset management for Blender",
@@ -53,11 +53,34 @@ from .gltf_action_filter import glTF2ExportUserExtension  # noqa: F401
 _queue_timer = None
 
 
+def _sweep_orphan_preview_images():
+    """Remove `_UL_PREVIEW_*` temp images left behind by a crashed/aborted
+    export. These are temporary downscaled texture copies our export operator
+    creates and normally cleans up in a finally block — but if Blender
+    crashed mid-export (or the operator was killed), they survive in
+    bpy.data.images. Cumulative bloat across crashed sessions. Run on
+    addon load and after any .blend load to keep things clean."""
+    try:
+        orphans = [img for img in bpy.data.images
+                   if img.name.startswith('_UL_PREVIEW_')]
+        for img in orphans:
+            try:
+                bpy.data.images.remove(img)
+            except Exception:
+                pass
+        if orphans:
+            print(f"[UL] swept {len(orphans)} orphaned _UL_PREVIEW_ image(s)")
+    except Exception:
+        pass  # bpy.data may not be ready in some early init contexts
+
+
 @persistent
 def load_handler(dummy):
     """Handler called when a .blend file is loaded"""
     # Restart queue listener after file load
     start_queue_listener()
+    # Sweep any orphan preview-temp images from the loaded file
+    _sweep_orphan_preview_images()
 
 
 def start_queue_listener():
@@ -154,6 +177,9 @@ def register():
 
     # Start queue listener
     start_queue_listener()
+
+    # Sweep any orphan _UL_PREVIEW_ images from a previously-crashed session
+    _sweep_orphan_preview_images()
 
 
 

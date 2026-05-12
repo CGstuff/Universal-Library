@@ -12,17 +12,23 @@ from .library_panel import (
 from .asset_switcher_panel import (
     UAL_PT_asset_switcher_panel,
 )
+from .header_button import (
+    UAL_MT_header_menu,
+)
 
 from . import library_panel
 from . import asset_switcher_panel
+from . import header_button
 
 
 def register():
     library_panel.register()
     asset_switcher_panel.register()
+    header_button.register()
 
 
 def unregister():
+    header_button.unregister()
     asset_switcher_panel.unregister()
     library_panel.unregister()
 
@@ -32,6 +38,7 @@ __all__ = [
     'UAL_PT_export_panel',
     'UAL_PT_settings_panel',
     'UAL_PT_asset_switcher_panel',
+    'UAL_MT_header_menu',
     'register',
     'unregister',
 ]

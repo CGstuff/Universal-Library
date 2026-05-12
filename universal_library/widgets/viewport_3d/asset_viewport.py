@@ -19,11 +19,12 @@ Public API:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QMouseEvent, QSurfaceFormat, QWheelEvent
+from PyQt6.QtGui import QColor, QImage, QMouseEvent, QSurfaceFormat, QWheelEvent
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
 from OpenGL.GL import *  # noqa: F403
@@ -37,7 +38,8 @@ from .gl_dsa import (
 from .gl_geometry import make_grid_lines
 from .gl_shaders import (
     MESH_VERT, MESH_FRAG, LINE_VERT, LINE_FRAG,
-    SKIN_VERT, SKIN_FRAG, MAX_JOINTS, compile_shader_program,
+    SKIN_VERT, SKIN_FRAG, SILHOUETTE_VERT, SILHOUETTE_FRAG,
+    MAX_JOINTS, compile_shader_program,
 )
 from .gltf_loader import (
     MeshData, GLBData, SkinData, NodeData, AnimationData, AnimationChannel,
@@ -45,6 +47,12 @@ from .gltf_loader import (
 from .mesh_cache import load_mesh, load_glb_data
 
 logger = logging.getLogger(__name__)
+
+
+# Bundled scale-reference silhouette PNG (same image used by the Blender addon).
+_SILHOUETTE_PNG_PATH = (
+    Path(__file__).resolve().parent.parent / "icons" / "human_silhouette.png"
+)
 
 
 _DEFAULT_BG = (0.25, 0.25, 0.25, 1.0)   # neutral mid-gray
@@ -144,19 +152,25 @@ class AssetViewport(QOpenGLWidget):
         self._bg = _DEFAULT_BG
         self._light_dir = _FALLBACK_LIGHT_DIR.copy()
 
-        # Pull persisted preferences (BG color + light direction) and
-        # subscribe to live changes so all open viewports stay in sync.
+        # Pull persisted preferences (BG color + light direction + scale ref)
+        # and subscribe to live changes so all open viewports stay in sync.
+        self._scale_ref_enabled = False
+        self._scale_ref_height = 1.8
         try:
             from ...services.viewport_settings import (
                 get_viewport_bg_color, get_viewport_light,
+                get_scale_ref_enabled, get_scale_ref_height,
                 viewport_settings_signals,
             )
             self.set_background_color(get_viewport_bg_color())
             az, el = get_viewport_light()
             self._light_dir = _light_dir_from_spherical(az, el)
+            self._scale_ref_enabled = get_scale_ref_enabled()
+            self._scale_ref_height = get_scale_ref_height()
             sig = viewport_settings_signals()
             sig.bg_changed.connect(self.set_background_color)
             sig.light_changed.connect(self._on_light_changed)
+            sig.scale_ref_changed.connect(self._on_scale_ref_changed)
         except Exception as e:
             # If settings infrastructure isn't available (e.g., the standalone
             # test harness), fall back to the compiled defaults.
@@ -166,6 +180,12 @@ class AssetViewport(QOpenGLWidget):
         self._mesh_program = None
         self._skin_program = None
         self._line_program = None
+        self._silhouette_program = None
+        self._silhouette_vao = None
+        self._silhouette_vbo = None
+        self._silhouette_ebo = None
+        self._silhouette_tex = 0       # GL texture name, 0 = not loaded
+        self._silhouette_aspect = 0.5  # half-width / height; refined on PNG load
         self._grid_vao = None
         self._grid_vbo = None
         self._grid_vert_count = 0
@@ -313,6 +333,13 @@ class AssetViewport(QOpenGLWidget):
         self._light_dir = _light_dir_from_spherical(azimuth_deg, elevation_deg)
         self.update()
 
+    def _on_scale_ref_changed(self, enabled: bool, height_m: float):
+        """Slot for the viewport_settings.scale_ref_changed signal — keeps
+        every open viewport in sync when the user toggles via any UI."""
+        self._scale_ref_enabled = bool(enabled)
+        self._scale_ref_height = float(height_m)
+        self.update()
+
     # ------------------------------------------------------------------
     # QOpenGLWidget hooks
     # ------------------------------------------------------------------
@@ -323,7 +350,11 @@ class AssetViewport(QOpenGLWidget):
             self._mesh_program = compile_shader_program(MESH_VERT, MESH_FRAG)
             self._skin_program = compile_shader_program(SKIN_VERT, SKIN_FRAG)
             self._line_program = compile_shader_program(LINE_VERT, LINE_FRAG)
+            self._silhouette_program = compile_shader_program(
+                SILHOUETTE_VERT, SILHOUETTE_FRAG,
+            )
             self._build_grid()
+            self._build_silhouette()
 
             glEnable(GL_DEPTH_TEST)
             glEnable(GL_CULL_FACE)
@@ -397,6 +428,72 @@ class AssetViewport(QOpenGLWidget):
         skinned_meshes = [m for m in self._meshes if m.skinned]
         if skinned_meshes and skin_palettes:
             self._draw_skinned_meshes(skinned_meshes, view, proj, eye, skin_palettes)
+
+        # Scale-reference silhouette (M5) — billboarded textured quad. Drawn
+        # last so it composites over the grid + meshes with alpha blending.
+        if self._scale_ref_enabled and self._silhouette_tex:
+            self._draw_silhouette(view, proj, eye)
+
+    def _draw_silhouette(self, view, proj, eye):
+        """Draw the human silhouette next to the loaded mesh's bbox."""
+        bbox = self._compute_world_bbox()
+        if bbox is None:
+            return
+        bbox_min, bbox_max = bbox
+
+        height = float(self._scale_ref_height)
+        if height <= 0:
+            return
+
+        # Anchor: same rule as the Blender addon. To the right (+X) of the
+        # bbox with clear breathing room, feet on Z=0 (world ground plane).
+        half_w_norm = float(self._silhouette_aspect)
+        offset = (half_w_norm + 0.25) * height
+        anchor = np.array([
+            float(bbox_max[0]) + offset,
+            (float(bbox_min[1]) + float(bbox_max[1])) * 0.5,
+            0.0,
+        ], dtype=np.float32)
+
+        # Billboard axes. World-Z up so silhouette stays upright; right is
+        # the camera's right axis (first row of the view matrix) projected
+        # against world up so the quad stays a clean rectangle when the
+        # camera is pitched.
+        view_inv = np.linalg.inv(view)
+        right = view_inv[0:3, 0].astype(np.float32)
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        right = right - up * float(np.dot(right, up))
+        n = float(np.linalg.norm(right))
+        if n < 1e-6:
+            right = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        else:
+            right = right / n
+
+        width = (half_w_norm * 2.0) * height
+
+        glUseProgram(self._silhouette_program)
+        p = self._silhouette_program
+        glUniformMatrix4fv(glGetUniformLocation(p, 'u_view'), 1, GL_TRUE, view)
+        glUniformMatrix4fv(glGetUniformLocation(p, 'u_proj'), 1, GL_TRUE, proj)
+        glUniform3f(glGetUniformLocation(p, 'u_anchor'), *anchor)
+        glUniform3f(glGetUniformLocation(p, 'u_right'), *right)
+        glUniform3f(glGetUniformLocation(p, 'u_up'), *up)
+        glUniform1f(glGetUniformLocation(p, 'u_width'), float(width))
+        glUniform1f(glGetUniformLocation(p, 'u_height'), float(height))
+        glUniform1i(glGetUniformLocation(p, 'u_tex'), 0)
+
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self._silhouette_tex)
+        # Silhouette is transparent on its outside — must not write depth
+        # or it'll occlude the asset behind it; must blend on top.
+        glDepthMask(GL_FALSE)
+        glDisable(GL_CULL_FACE)
+        glBindVertexArray(self._silhouette_vao)
+        glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, None)
+        glBindVertexArray(0)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glEnable(GL_CULL_FACE)
+        glDepthMask(GL_TRUE)
 
     def _draw_static_meshes(self, meshes, view, proj, eye):
         glUseProgram(self._mesh_program)
@@ -532,6 +629,87 @@ class AssetViewport(QOpenGLWidget):
         self._grid_vao = vao
         self._grid_vbo = vbo
         self._grid_vert_count = verts.shape[0]
+
+    def _build_silhouette(self):
+        """Build the silhouette quad VAO + load the PNG into a GL texture.
+
+        Quad lives in local space: x in [-0.5, 0.5], y in [0, 1] (feet at
+        y=0, head at y=1). The vertex shader transforms these into world
+        space using camera-right and world-up uniforms each frame.
+        Vertices interleaved as (x, y, u, v) → stride 16 bytes.
+        UV layout: v=0 at feet (bottom of PNG), v=1 at head (top of PNG).
+        """
+        # 4 verts × (vec2 local + vec2 uv) = 4×4 floats = 64 bytes total.
+        quad = np.array([
+            [-0.5, 0.0, 0.0, 0.0],   # bottom-left
+            [ 0.5, 0.0, 1.0, 0.0],   # bottom-right
+            [ 0.5, 1.0, 1.0, 1.0],   # top-right
+            [-0.5, 1.0, 0.0, 1.0],   # top-left
+        ], dtype=np.float32)
+        indices = np.array([0, 1, 2, 0, 2, 3], dtype=np.uint32)
+
+        vbo = dsa_create_buffer()
+        dsa_buffer_storage(vbo, quad)
+        ebo = dsa_create_buffer()
+        dsa_buffer_storage(ebo, indices)
+        vao = dsa_create_vao()
+        dsa_vao_vertex_buffer(vao, binding=0, buffer=vbo, offset=0, stride=16)
+        # location 0: local position (vec2)
+        dsa_vao_attrib_format(vao, attrib=0, size=2, gl_type=GL_FLOAT, offset=0)
+        dsa_vao_attrib_binding(vao, attrib=0, binding=0)
+        dsa_enable_vao_attrib(vao, attrib=0)
+        # location 1: uv (vec2)
+        dsa_vao_attrib_format(vao, attrib=1, size=2, gl_type=GL_FLOAT, offset=8)
+        dsa_vao_attrib_binding(vao, attrib=1, binding=0)
+        dsa_enable_vao_attrib(vao, attrib=1)
+        dsa_vao_element_buffer(vao, ebo)
+        self._silhouette_vao = vao
+        self._silhouette_vbo = vbo
+        self._silhouette_ebo = ebo
+
+        # Load PNG via QImage → GL texture. Fail-open: if the PNG is missing
+        # or unreadable we just don't draw the silhouette (no error toast).
+        if not _SILHOUETTE_PNG_PATH.exists():
+            logger.warning(
+                "[AssetViewport] scale-ref PNG missing at %s", _SILHOUETTE_PNG_PATH,
+            )
+            return
+
+        img = QImage(str(_SILHOUETTE_PNG_PATH))
+        if img.isNull():
+            logger.warning(
+                "[AssetViewport] failed to load scale-ref PNG: %s", _SILHOUETTE_PNG_PATH,
+            )
+            return
+
+        # Convert to a canonical format we know GL can consume directly.
+        img = img.convertToFormat(QImage.Format.Format_RGBA8888)
+        w, h = img.width(), img.height()
+        if w <= 0 or h <= 0:
+            return
+
+        # Flip vertically so v=0 at the bottom of the texture lines up with
+        # feet at y=0 in our quad. QImage's coordinate origin is top-left;
+        # GL textures expect bottom-left for the conventional v=0.
+        img = img.mirrored(False, True)
+
+        ptr = img.constBits()
+        ptr.setsize(img.sizeInBytes())
+        data = bytes(ptr)
+
+        tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data)
+        glGenerateMipmap(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, 0)
+
+        self._silhouette_tex = tex
+        # half-width / full-height in normalized quad units
+        self._silhouette_aspect = (w / h) / 2.0
 
     def _apply_glb(self, glb: GLBData, path: Optional[str]):
         """Apply a freshly-loaded GLBData: upload meshes, capture animation
@@ -726,17 +904,17 @@ class AssetViewport(QOpenGLWidget):
                 pass
         self._meshes.clear()
 
-    def _frame_meshes(self):
-        """Fit the camera to the loaded mesh bounding box.
+    def _compute_world_bbox(self):
+        """Compute the union bbox of all loaded meshes in Z-up world space.
 
-        For static meshes, vertices are already in Z-up world space at load
-        time — bbox is correct.
-        For skinned meshes, vertices are in skin-local glTF (Y-up) space; we
-        apply the Y→Z rotation to get a comparable bbox so the camera frames
-        them correctly in bind pose.
+        Same logic as `_frame_meshes` (skinned meshes get the Y→Z swap to
+        match how they render). Extracted so the scale-reference silhouette
+        can position itself next to the asset.
+
+        Returns (min: np.ndarray(3), max: np.ndarray(3)) or None.
         """
         if self._glb is None or not self._glb.meshes:
-            return
+            return None
         mins = []
         maxs = []
         for md in self._glb.meshes:
@@ -744,19 +922,22 @@ class AssetViewport(QOpenGLWidget):
                 continue
             v = md.vertices
             if md.skin_index is not None:
-                # Convert Y-up to Z-up for bbox purposes
-                v = v.copy()
-                v_zup = np.column_stack([v[:, 0], v[:, 2], -v[:, 1]])
+                v_zup = np.column_stack([v[:, 0], -v[:, 2], v[:, 1]])
                 mins.append(v_zup.min(axis=0))
                 maxs.append(v_zup.max(axis=0))
             else:
                 mins.append(v.min(axis=0))
                 maxs.append(v.max(axis=0))
         if not mins:
+            return None
+        return np.min(np.array(mins), axis=0), np.max(np.array(maxs), axis=0)
+
+    def _frame_meshes(self):
+        """Fit the camera to the loaded mesh bounding box."""
+        bbox = self._compute_world_bbox()
+        if bbox is None:
             return
-        bbox_min = np.min(np.array(mins), axis=0)
-        bbox_max = np.max(np.array(maxs), axis=0)
-        self.camera.frame_bbox(bbox_min, bbox_max)
+        self.camera.frame_bbox(bbox[0], bbox[1])
 
     # ------------------------------------------------------------------
     # Animation sampling + forward kinematics + joint palette
@@ -910,8 +1091,19 @@ def _sample_channel(channel: AnimationChannel, t: float):
     Interpolation:
         - STEP        → previous keyframe
         - LINEAR      → linear blend (with SLERP for quaternions)
-        - CUBICSPLINE → falls back to linear (CUBICSPLINE has tangent
-          values interleaved; full support is a Phase 6 polish item)
+        - CUBICSPLINE → falls back to linear interpolation between the
+          stored value slots (skipping tangents).
+
+    KNOWN LIMITATION (verified harmless for current Blender exports):
+    The single-keyframe early-return (times.size == 1) and the clamp paths
+    (t <= times[0], t >= times[-1]) return values[i] unconditionally —
+    they don't honor CUBICSPLINE's 3-slot-per-keyframe packing
+    (in_tangent, value, out_tangent), so they'd return a tangent instead
+    of the value at the edges of a CUBICSPLINE channel. Verified against
+    production exports (60 samplers, 0 CUBICSPLINE) — Blender's exporter
+    emits STEP/LINEAR for our rigs. Fix path if we ever ship rigs with
+    CUBICSPLINE: check `interp == 'CUBICSPLINE'` in each branch and use
+    `values[i * 3 + 1]` instead.
     """
     times = channel.times
     values = channel.values

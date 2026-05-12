@@ -71,6 +71,9 @@ from .update_thumbnail import (
     UAL_OT_update_thumbnail,
     UAL_OT_toggle_thumbnail_helper,
 )
+from .scale_helper import (
+    UAL_OT_lock_scale_reference,
+)
 
 # For registration
 from . import export_to_library
@@ -88,6 +91,7 @@ from . import asset_switcher
 from . import representation_swap
 from . import update_proxy
 from . import update_thumbnail
+from . import scale_helper
 
 
 def register():
@@ -106,9 +110,11 @@ def register():
     representation_swap.register()
     update_proxy.register()
     update_thumbnail.register()
+    scale_helper.register()
 
 
 def unregister():
+    scale_helper.unregister()
     update_thumbnail.unregister()
     update_proxy.unregister()
     representation_swap.unregister()
@@ -164,6 +170,7 @@ __all__ = [
     'UAL_OT_update_proxy',
     'UAL_OT_update_thumbnail',
     'UAL_OT_toggle_thumbnail_helper',
+    'UAL_OT_lock_scale_reference',
     'register',
     'unregister',
 ]

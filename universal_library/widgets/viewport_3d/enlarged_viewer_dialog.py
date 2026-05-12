@@ -33,6 +33,7 @@ from .light_direction_dialog import LightDirectionDialog
 from ...services.viewport_settings import (
     get_viewport_bg_color, set_viewport_bg_color,
     get_viewport_fps, set_viewport_fps,
+    get_scale_ref_enabled, get_scale_ref_height, set_scale_ref,
 )
 
 # Icons live under universal_library/widgets/icons/. We're at
@@ -65,6 +66,9 @@ class EnlargedViewerDialog(QDialog):
         )
         # Non-modal so the user can keep clicking around the library
         self.setModal(False)
+        # Auto-deleted when closed — without this, every close+reopen cycle
+        # leaks a GL context on the parent's `_enlarge_dialog` reference.
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.resize(self._DEFAULT_SIZE)
         self.setMinimumSize(self._MIN_SIZE)
 
@@ -109,6 +113,16 @@ class EnlargedViewerDialog(QDialog):
         self._light_btn.setToolTip("Adjust the directional light's angle (applies globally)")
         self._light_btn.clicked.connect(self._on_light_clicked)
         toolbar.addWidget(self._light_btn)
+
+        # Scale reference toggle — 1.8 m human silhouette next to the asset.
+        self._scale_ref_cb = QCheckBox("Scale Ref")
+        self._scale_ref_cb.setToolTip(
+            "Show a human silhouette next to the asset for scale comparison "
+            "(applies globally)"
+        )
+        self._scale_ref_cb.setChecked(get_scale_ref_enabled())
+        self._scale_ref_cb.toggled.connect(self._on_scale_ref_toggled)
+        toolbar.addWidget(self._scale_ref_cb)
 
         toolbar.addStretch(1)
 
@@ -283,6 +297,11 @@ class EnlargedViewerDialog(QDialog):
         dlg = LightDirectionDialog(self)
         dlg.show()
         dlg.raise_()
+
+    def _on_scale_ref_toggled(self, checked: bool):
+        """Persist + broadcast scale-ref toggle. Every open viewport
+        (panel + this dialog) picks it up via viewport_settings signals."""
+        set_scale_ref(bool(checked), get_scale_ref_height())
 
     # ------------------------------------------------------------------
     # Viewport signals

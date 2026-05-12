@@ -113,6 +113,51 @@ class UAL_Preferences(AddonPreferences):
         default=True
     )
 
+    # ---------------- M6: Attribution defaults ----------------
+    # These are the *permanent* defaults applied to every export.
+    # The export dialog shows them pre-filled — user can override per-asset
+    # there for one-offs (an override does NOT update these defaults).
+    # On change we mirror them to the shared AppData JSON so the desktop
+    # app's metadata panel reads the same values.
+    default_license: EnumProperty(
+        name="Default License",
+        description="License code applied to new exports (override per-asset in the export dialog)",
+        items=[
+            ('',             "—",                    "No license set"),
+            ('CC0',          "CC0 (Public Domain)",  "Creative Commons Zero — public domain dedication"),
+            ('CC-BY',        "CC-BY",                "Attribution required"),
+            ('CC-BY-SA',     "CC-BY-SA",             "Attribution + share-alike"),
+            ('CC-BY-NC',     "CC-BY-NC",             "Attribution, non-commercial"),
+            ('MIT',          "MIT",                  "Permissive open-source"),
+            ('GPL-3.0',      "GPL-3.0",              "Copyleft"),
+            ('Proprietary',  "Proprietary",          "All rights reserved"),
+            ('Custom',       "Custom...",            "Use the Default License (Custom) field"),
+        ],
+        default='',
+        update=lambda self, ctx: self._on_attribution_changed()
+    )
+
+    default_license_custom: StringProperty(
+        name="Default License (Custom)",
+        description="Custom license text — only used when Default License is set to Custom",
+        default="",
+        update=lambda self, ctx: self._on_attribution_changed()
+    )
+
+    default_copyright: StringProperty(
+        name="Default Copyright",
+        description="Copyright string for new exports (e.g. '© 2026 Your Name')",
+        default="",
+        update=lambda self, ctx: self._on_attribution_changed()
+    )
+
+    default_author: StringProperty(
+        name="Default Author",
+        description="Creator name for new exports",
+        default="",
+        update=lambda self, ctx: self._on_attribution_changed()
+    )
+
     # UI settings
     show_polygon_count: BoolProperty(
         name="Show Polygon Count",
@@ -128,6 +173,19 @@ class UAL_Preferences(AddonPreferences):
             ('DETAILED', "Detailed", "Show more details per asset"),
         ],
         default='COMPACT'
+    )
+
+    header_button_location: EnumProperty(
+        name="Header Button Location",
+        description="Where the Universal Library launcher button appears",
+        items=[
+            ('VIEW3D_HEADER', "3D Viewport Header", "Next to the Global/Local dropdown"),
+            ('TOPBAR', "Topbar", "Top of the window, next to workspace tabs"),
+            ('STATUSBAR', "Status Bar", "Bottom of the window"),
+            ('HIDDEN', "Hidden", "Don't show the launcher button"),
+        ],
+        default='VIEW3D_HEADER',
+        update=lambda self, ctx: self._on_header_location_changed()
     )
 
     # Desktop App settings
@@ -172,6 +230,36 @@ class UAL_Preferences(AddonPreferences):
                 _write_appdata_path(self.library_path)
             except Exception as e:
                 pass
+
+    def _on_header_location_changed(self):
+        """Re-attach the header launcher to the selected region without a full addon reload"""
+        try:
+            from .panels import header_button
+            header_button.refresh_location()
+        except Exception:
+            pass
+
+    def _resolved_license(self) -> str:
+        """Resolve the license enum + custom-text combo into a single string
+        value to use in exports / write to AppData."""
+        if self.default_license == 'Custom':
+            return self.default_license_custom.strip()
+        return self.default_license
+
+    def _on_attribution_changed(self):
+        """M6: mirror the addon's attribution defaults to the shared
+        AppData JSON so the desktop app's metadata panel can display the
+        same values. Source of truth lives here in addon prefs; the JSON
+        is just the broadcast channel."""
+        try:
+            from .utils.appdata import write_attribution_defaults
+            write_attribution_defaults(
+                self._resolved_license(),
+                self.default_copyright,
+                self.default_author,
+            )
+        except Exception:
+            pass
 
     def draw(self, context):
         layout = self.layout
@@ -222,11 +310,29 @@ class UAL_Preferences(AddonPreferences):
             row = col.row(align=True)
             row.prop(self, "prefix_character", text="Character")
 
+        # M6: Attribution defaults — applied to every export, overrideable
+        # per-asset in the export dialog. Stored here AND mirrored to AppData
+        # so the desktop app's metadata panel reads the same values.
+        box = layout.box()
+        box.label(text="Attribution Defaults", icon='USER')
+        box.prop(self, "default_license")
+        if self.default_license == 'Custom':
+            box.prop(self, "default_license_custom")
+        box.prop(self, "default_copyright")
+        box.prop(self, "default_author")
+        info_row = box.row()
+        info_row.scale_y = 0.7
+        info_row.label(
+            text="Used as defaults for new exports; overrideable per-asset in the export dialog.",
+            icon='INFO',
+        )
+
         # UI section
         box = layout.box()
         box.label(text="Display Settings", icon='WINDOW')
         box.prop(self, "show_polygon_count")
         box.prop(self, "list_display_mode")
+        box.prop(self, "header_button_location")
 
         # Desktop App section
         box = layout.box()

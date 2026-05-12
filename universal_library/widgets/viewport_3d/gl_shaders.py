@@ -147,3 +147,52 @@ def compile_shader_program(vert_src: str, frag_src: str) -> int:
     vs = gl_shaders.compileShader(vert_src, GL_VERTEX_SHADER)
     fs = gl_shaders.compileShader(frag_src, GL_FRAGMENT_SHADER)
     return gl_shaders.compileProgram(vs, fs)
+
+
+# ── Scale-reference silhouette shader (textured billboard) ──────────────
+#
+# A unit quad in local [-0.5..0.5] x [0..1] coords is transformed in the
+# vertex shader using uniforms (anchor + camera-right + world-up + width
+# + height) so the silhouette stays:
+#   - feet on the world ground plane (always at anchor.z)
+#   - upright (world Z up, never tilted)
+#   - facing the camera (right axis = camera's right projected against Z)
+# The PNG is sampled directly; pixels below an alpha threshold are
+# discarded so the bbox/grid behind the silhouette stays visible.
+SILHOUETTE_VERT = """
+#version 460
+layout(location = 0) in vec2 in_local;
+layout(location = 1) in vec2 in_uv;
+
+uniform mat4 u_view;
+uniform mat4 u_proj;
+uniform vec3 u_anchor;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform float u_width;
+uniform float u_height;
+
+out vec2 v_uv;
+
+void main() {
+    vec3 world_pos = u_anchor
+                   + u_right * (in_local.x * u_width)
+                   + u_up    * (in_local.y * u_height);
+    gl_Position = u_proj * u_view * vec4(world_pos, 1.0);
+    v_uv = in_uv;
+}
+"""
+
+SILHOUETTE_FRAG = """
+#version 460
+in vec2 v_uv;
+out vec4 frag_color;
+
+uniform sampler2D u_tex;
+
+void main() {
+    vec4 c = texture(u_tex, v_uv);
+    if (c.a < 0.01) discard;
+    frag_color = c;
+}
+"""

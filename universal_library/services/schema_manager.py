@@ -24,7 +24,7 @@ class SchemaManager:
     while preserving existing data.
     """
 
-    SCHEMA_VERSION = 17  # Versioned filename convention migration marker
+    SCHEMA_VERSION = 18  # M6: Attribution (license + copyright columns)
 
     def __init__(self, connection: sqlite3.Connection):
         """
@@ -281,6 +281,12 @@ class SchemaManager:
             'bbox_x': 'REAL',
             'bbox_y': 'REAL',
             'bbox_z': 'REAL',
+            # M6: Attribution. `author` already in the original schema; these
+            # two fields complete the legal-metadata triple. NULL is fine
+            # for pre-migration assets; UI shows empty fields and saves
+            # whatever the user types.
+            'license': 'TEXT',
+            'copyright': 'TEXT',
         }
 
         self._add_missing_columns(cursor, 'assets', asset_columns, asset_columns_existing)

@@ -200,8 +200,9 @@ class AssetRepository(BaseRepository):
                         polygon_count, material_count, tags, author, source_application,
                         status, version, version_label, version_group_id, is_latest,
                         asset_id, variant_name, variant_source_uuid,
+                        license, copyright,
                         created_date, modified_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     asset_data.get('uuid'),
                     asset_data.get('name'),
@@ -229,6 +230,8 @@ class AssetRepository(BaseRepository):
                     asset_id,
                     variant_name,
                     variant_source_uuid,
+                    asset_data.get('license') or None,
+                    asset_data.get('copyright') or None,
                     now,
                     now
                 ))
@@ -402,36 +405,35 @@ class AssetRepository(BaseRepository):
         return success
 
     def delete(self, uuid: str) -> bool:
-        """Delete asset by UUID and its EAV metadata."""
+        """Delete asset by UUID and its EAV metadata.
+
+        Junction-table rows are deleted first (child) before the asset row
+        (parent) so FK constraints — if `ON DELETE RESTRICT` — don't block
+        the parent delete. NOTE: a prior version wrapped this in
+        `PRAGMA foreign_keys = OFF/ON`, but SQLite ignores that pragma
+        inside an active transaction (see sqlite.org/pragma.html). The
+        child-first ordering is what actually makes this work.
+        """
         deleted = False
         try:
             with self._transaction() as conn:
                 cursor = conn.cursor()
 
-                # Temporarily disable foreign key checks to avoid constraint issues.
-                # Wrapped in try/finally so FKs are always restored — without this,
-                # an exception below would leave FKs disabled on this thread's
-                # long-lived connection for the rest of the session.
-                cursor.execute('PRAGMA foreign_keys = OFF')
+                # Delete from asset_tags junction table (child)
                 try:
-                    # Delete from asset_tags junction table
-                    try:
-                        cursor.execute('DELETE FROM asset_tags WHERE asset_uuid = ?', (uuid,))
-                    except Exception as e:
-                        logger.debug(f"Could not delete asset_tags for {uuid}: {e}")
+                    cursor.execute('DELETE FROM asset_tags WHERE asset_uuid = ?', (uuid,))
+                except Exception as e:
+                    logger.debug(f"Could not delete asset_tags for {uuid}: {e}")
 
-                    # Delete from asset_folders junction table
-                    try:
-                        cursor.execute('DELETE FROM asset_folders WHERE asset_uuid = ?', (uuid,))
-                    except Exception as e:
-                        logger.debug(f"Could not delete asset_folders for {uuid}: {e}")
+                # Delete from asset_folders junction table (child)
+                try:
+                    cursor.execute('DELETE FROM asset_folders WHERE asset_uuid = ?', (uuid,))
+                except Exception as e:
+                    logger.debug(f"Could not delete asset_folders for {uuid}: {e}")
 
-                    # Now delete the asset itself
-                    cursor.execute('DELETE FROM assets WHERE uuid = ?', (uuid,))
-                    deleted = cursor.rowcount > 0
-                finally:
-                    # Re-enable foreign key checks unconditionally
-                    cursor.execute('PRAGMA foreign_keys = ON')
+                # Now delete the asset itself (parent)
+                cursor.execute('DELETE FROM assets WHERE uuid = ?', (uuid,))
+                deleted = cursor.rowcount > 0
         except Exception as e:
             import traceback
             traceback.print_exc()

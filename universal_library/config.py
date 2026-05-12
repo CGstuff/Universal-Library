@@ -30,7 +30,7 @@ class Config:
     if _version_file.exists():
         APP_VERSION = _version_file.read_text().strip().lstrip('v')
     else:
-        APP_VERSION = "1.0.0"  # Dev/fallback version
+        APP_VERSION = "1.2.1"  # Dev/fallback version
 
     APP_AUTHOR = "CGstuff"
 

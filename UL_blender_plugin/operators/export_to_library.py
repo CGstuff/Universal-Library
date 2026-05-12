@@ -5,6 +5,8 @@ Exports selected objects to USD and adds them to the Universal Library.
 """
 
 import bpy
+import contextlib
+import logging
 import uuid
 import json
 import shutil
@@ -25,8 +27,72 @@ from ..preferences import get_preferences, get_naming_prefixes
 from ..gltf_action_filter import gltf_action_filter_session
 
 
+logger = logging.getLogger(__name__)
+
+
 # JSON Metadata Schema Version
 METADATA_SCHEMA_VERSION = 1
+
+
+@contextlib.contextmanager
+def _silence_native_stdout():
+    """Suppress Python-level stdout/stderr around a block.
+
+    Blender's glTF exporter prints a lot of status during export
+    (Draco encoder messages, image-format INFO lines, etc.). We
+    redirect Python's stdout/stderr to /dev/null for the duration of
+    the block so those don't clutter the user's console.
+
+    Implementation choice: pure-Python `redirect_stdout/stderr` only
+    (NOT fd-level `os.dup2`). The dup2 approach catches more output —
+    including C-level prints — but breaks Python's `print()` on Windows
+    with `OSError: [WinError 1] Incorrect function` because the gltf
+    addon's `print()` calls find a stale TextIOWrapper state after the
+    underlying fd has been swapped. Python-level redirect is safe and
+    catches everything the gltf addon emits via Python; some pure-C
+    Draco status may still leak, but no crash.
+
+    Fail-open: if anything in the redirect setup fails (rare), we just
+    run the block without suppression rather than aborting the export.
+    """
+    try:
+        sink = open(os.devnull, 'w')
+    except OSError:
+        # If we can't even open devnull, run unredirected.
+        yield
+        return
+    try:
+        with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+            yield
+    finally:
+        try:
+            sink.close()
+        except OSError:
+            pass
+
+
+def _wrap_for_dialog(text: str, width: int = 58) -> list:
+    """Word-wrap a single warning string into ≤`width`-char lines.
+
+    Blender's operator-dialog `layout.label(text=…)` does not word-wrap;
+    long strings get clipped at the dialog's right edge. We split on word
+    boundaries ourselves so multi-line warnings actually appear readable.
+    """
+    words = text.split()
+    if not words:
+        return [""]
+    lines, current = [], ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= width:
+            current = candidate
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines
 
 
 def generate_asset_json_metadata(
@@ -309,6 +375,65 @@ class UAL_OT_export_to_library(Operator):
         default=False,
     )
 
+    # M6: Attribution — by default the export inherits from addon prefs
+    # (Preferences → Universal Library → Attribution Defaults). Tick the
+    # `attr_override` box in the export dialog to set per-asset values
+    # for this export only. The override does NOT change the defaults.
+    attr_override: BoolProperty(
+        name="Override Attribution",
+        description=(
+            "Use custom license / copyright / author for this asset only. "
+            "Otherwise inherit from Preferences → Attribution Defaults."
+        ),
+        default=False,
+    )
+    attr_license_enum: EnumProperty(
+        name="License",
+        description="License code for this asset",
+        items=[
+            ('',             "—",                    ""),
+            ('CC0',          "CC0 (Public Domain)",  ""),
+            ('CC-BY',        "CC-BY",                ""),
+            ('CC-BY-SA',     "CC-BY-SA",             ""),
+            ('CC-BY-NC',     "CC-BY-NC",             ""),
+            ('MIT',          "MIT",                  ""),
+            ('GPL-3.0',      "GPL-3.0",              ""),
+            ('Proprietary',  "Proprietary",          ""),
+            ('Custom',       "Custom...",            ""),
+        ],
+        default='',
+    )
+    attr_license_custom: StringProperty(
+        name="License (Custom)",
+        description="Custom license text",
+        default="",
+    )
+    attr_copyright: StringProperty(
+        name="Copyright",
+        description="Copyright string (e.g. '© 2026 Your Name')",
+        default="",
+    )
+    attr_author: StringProperty(
+        name="Author",
+        description="Creator name",
+        default="",
+    )
+
+    # Mesh-only: opt-in to save the user-organized collection structure
+    # alongside the exported objects. Rigs always preserve collections
+    # (they need them for bone widgets to link correctly), so this only
+    # affects mesh exports — see _save_blend_backup() for the gating logic.
+    preserve_collections: BoolProperty(
+        name="Preserve Collections",
+        description=(
+            "Save the user-created collections that contain selected objects "
+            "into the .blend so the same folder structure appears on re-import. "
+            "Especially useful for kitbash sets and multi-collection assets "
+            "imported via INSTANCE mode."
+        ),
+        default=False,
+    )
+
     new_variant_name: StringProperty(
         name="Variant Name",
         description="Name for the new variant (e.g., 'Destroyed', 'Red')",
@@ -342,6 +467,32 @@ class UAL_OT_export_to_library(Operator):
         # Get preferences
         prefs = get_preferences()
         use_auto_naming = prefs.use_auto_naming if prefs else True
+
+        # M6: Pre-fill attribution from prefs so the override fields show
+        # the defaults as a *starting point* when the user ticks Override.
+        # When override is off these props aren't used — execute() reads
+        # prefs directly. We still populate them so toggling override on
+        # mid-dialog doesn't show empty fields.
+        if prefs is not None:
+            try:
+                # License: prefer the enum value; fall back to Custom +
+                # custom text if the stored license is non-standard.
+                license_val = prefs.default_license
+                if license_val == 'Custom':
+                    self.attr_license_enum = 'Custom'
+                    self.attr_license_custom = prefs.default_license_custom
+                elif license_val:
+                    self.attr_license_enum = license_val
+                    self.attr_license_custom = ""
+                else:
+                    self.attr_license_enum = ''
+                    self.attr_license_custom = ""
+                self.attr_copyright = prefs.default_copyright
+                self.attr_author = prefs.default_author
+                # Default: override off (use prefs)
+                self.attr_override = False
+            except Exception:
+                pass
 
         # Check for UAL metadata on selected objects (imported from library)
         self._check_ual_metadata(context)
@@ -504,6 +655,63 @@ class UAL_OT_export_to_library(Operator):
         box.prop(self, "include_materials")
         box.prop(self, "include_animations")
         box.prop(self, "export_selected_only")
+
+        # M6: Attribution. Default: read-only display of values inherited
+        # from addon prefs (grayed out — same look as Blender's modifier
+        # overrides). Tick "Override" to set per-asset values; those values
+        # apply ONLY to this export and do not update the defaults.
+        attr_box = layout.box()
+        header = attr_box.row()
+        header.label(text="Attribution:", icon='USER')
+        header.prop(self, "attr_override", text="Override")
+
+        if self.attr_override:
+            attr_box.prop(self, "attr_license_enum", text="License")
+            if self.attr_license_enum == 'Custom':
+                attr_box.prop(self, "attr_license_custom", text="")
+            attr_box.prop(self, "attr_copyright", text="Copyright")
+            attr_box.prop(self, "attr_author", text="Author")
+        else:
+            # Read-only inheritance view. Pull live from prefs so any change
+            # the user makes in Preferences without closing the dialog is
+            # reflected on the next redraw.
+            col = attr_box.column(align=True)
+            col.enabled = False
+            license_display = "—"
+            cr_display = "—"
+            author_display = "—"
+            if prefs is not None:
+                try:
+                    resolved = prefs._resolved_license()
+                    license_display = resolved if resolved else "—"
+                    cr_display = prefs.default_copyright or "—"
+                    author_display = prefs.default_author or "—"
+                except Exception:
+                    pass
+            col.label(text=f"License: {license_display}")
+            col.label(text=f"Copyright: {cr_display}")
+            col.label(text=f"Author: {author_display}")
+
+        # Mesh-only: opt-in collection preservation. Rigs already do this
+        # automatically because bone widgets need it, so we don't show the
+        # checkbox for them.
+        if self.asset_type == 'mesh':
+            box.prop(self, "preserve_collections")
+
+        # Rig-only: soft warning when the armature is parented only to the
+        # Scene Collection root while meshes live in a sub-collection. This
+        # is the "armature vanishes on INSTANCE import" pitfall.
+        if self.asset_type == 'rig':
+            arm_warning = self._check_armature_collection_warning(context)
+            if arm_warning:
+                warn_box = layout.box()
+                warn_row = warn_box.row()
+                warn_row.alert = True
+                warn_row.label(text="Armature collection warning:", icon='ERROR')
+                # Wrap the message across multiple label rows since Blender
+                # doesn't word-wrap a single label inside an operator dialog.
+                for line in _wrap_for_dialog(arm_warning, width=58):
+                    warn_box.label(text=line)
 
         # Rig-only: explicit animation picker. Drives both .blend save and
         # .glb export — no bone-name guessing, no NLA staging.
@@ -772,7 +980,11 @@ class UAL_OT_export_to_library(Operator):
                 'polygon_count': metadata.get('polygon_count', 0),
                 'material_count': metadata.get('material_count', 0),
                 'tags': [],
-                'author': '',
+                # M6: Attribution — resolved from prefs OR override
+                # (see _resolve_attribution). Author, license, copyright
+                # are baked in here; the app's metadata panel displays
+                # them read-only.
+                **self._resolve_attribution(),
                 'source_application': f'Blender {bpy.app.version_string}',
                 # Versioning fields
                 'version': version,
@@ -944,6 +1156,104 @@ class UAL_OT_export_to_library(Operator):
             return 'rig'
 
         return 'mesh'
+
+    def _resolve_attribution(self) -> dict:
+        """M6: pick the attribution values for this export.
+
+        If `attr_override` is on, use the per-export values from the
+        dialog. Otherwise inherit from Preferences → Attribution Defaults.
+        Returns a dict ready to merge into `asset_data`.
+        """
+        if self.attr_override:
+            if self.attr_license_enum == 'Custom':
+                license_value = self.attr_license_custom.strip() or 'Custom'
+            else:
+                license_value = self.attr_license_enum
+            copyright_value = self.attr_copyright.strip()
+            author_value = self.attr_author.strip()
+        else:
+            prefs = get_preferences()
+            if prefs is not None:
+                try:
+                    license_value = prefs._resolved_license()
+                    copyright_value = prefs.default_copyright
+                    author_value = prefs.default_author
+                except Exception:
+                    license_value = copyright_value = author_value = ''
+            else:
+                license_value = copyright_value = author_value = ''
+
+        return {
+            'author': author_value or '',
+            'license': license_value or None,
+            'copyright': copyright_value or None,
+        }
+
+    def _check_armature_collection_warning(self, context) -> str:
+        """Detect the "armature in Scene Collection root" rig-export pitfall.
+
+        Returns a user-facing warning string when:
+            - we are exporting a rig (asset_type == 'rig')
+            - the armature object is NOT in any user-created sub-collection
+              (i.e. it lives only in the Scene Collection root)
+            - AND at least one selected mesh IS in a user-created sub-collection
+
+        The mechanics: `_save_blend_backup` iterates `bpy.data.collections` to
+        decide which collections to bundle into the .blend. `bpy.data.collections`
+        excludes the Scene Collection root, so an armature parented only there
+        has no collection saved with it. On INSTANCE import the linked collection
+        contains only the meshes — the armature appears to vanish.
+
+        IMPORTANT — Blender API gotcha:
+        `obj.users_collection` INCLUDES the master Scene Collection
+        (`scene.collection`). An object that lives "only in the root" still
+        returns `(scene.collection,)` here, not an empty tuple. So we have
+        to explicitly compare against `scene.collection` rather than just
+        truth-testing the result.
+
+        Returns empty string when the check doesn't apply or no issue is detected.
+        """
+        if self.asset_type != 'rig':
+            return ""
+
+        selected = context.selected_objects
+        if not selected:
+            return ""
+
+        armatures = [o for o in selected if o.type == 'ARMATURE']
+        if not armatures:
+            return ""
+
+        # Rig export pulls in bound meshes automatically — user only needs
+        # to select the armature. Use the same resolver the actual export
+        # uses so the warning reflects what will actually be saved.
+        meshes = self._collect_rig_export_meshes(selected)
+        if not meshes:
+            return ""
+
+        scene_root = context.scene.collection
+
+        def _in_subcollection(obj):
+            """True if obj is a member of any collection other than the scene root."""
+            for col in obj.users_collection:
+                if col != scene_root:
+                    return True
+            return False
+
+        armature_in_sub = any(_in_subcollection(arm) for arm in armatures)
+        mesh_in_sub = any(_in_subcollection(m) for m in meshes)
+
+        if not armature_in_sub and mesh_in_sub:
+            arm_name = armatures[0].name if len(armatures) == 1 else f"{len(armatures)} armatures"
+            return (
+                f"'{arm_name}' is in the Scene Collection (root). "
+                "On INSTANCE import the armature won't appear, because only "
+                "sub-collections are saved with the asset. "
+                "Move the armature into a sub-collection (with the meshes "
+                "or its own) before exporting."
+            )
+
+        return ""
 
     def _check_material_warnings(self, context) -> list:
         """Check for material conversion warnings"""
@@ -1224,12 +1534,17 @@ class UAL_OT_export_to_library(Operator):
                             if widget.data:
                                 data_blocks.add(widget.data)
 
-            # For rigs: also save collections (needed for custom shapes when linking)
+            # Save user-created collections that contain any exported object.
+            # Required for rigs (bone widgets need their collection to link
+            # correctly); optional for meshes via the `preserve_collections`
+            # checkbox so users can keep kitbash / multi-folder organization
+            # intact for INSTANCE-mode re-imports.
             has_armature = any(
                 isinstance(b, bpy.types.Object) and b.type == 'ARMATURE'
                 for b in data_blocks
             )
-            if has_armature:
+            preserve_collections = bool(getattr(self, 'preserve_collections', False))
+            if has_armature or preserve_collections:
                 exported_objects = {b for b in data_blocks if isinstance(b, bpy.types.Object)}
                 for col in bpy.data.collections:
                     for obj in col.objects:
@@ -1237,11 +1552,14 @@ class UAL_OT_export_to_library(Operator):
                             data_blocks.add(col)
                             break
 
-                # Explicitly include the actions the user ticked in the rig
-                # picker. `bpy.data.libraries.write` is a SUBSET save — it
-                # only follows references reachable from data_blocks. Actions
-                # the user marked with fake_user but didn't currently attach
-                # via active/NLA would otherwise be silently dropped.
+            # Rig-specific: explicitly include the actions the user ticked in
+            # the rig picker. `bpy.data.libraries.write` is a SUBSET save — it
+            # only follows references reachable from data_blocks. Actions the
+            # user marked with fake_user but didn't currently attach via
+            # active/NLA would otherwise be silently dropped.
+            # Scoped to `has_armature` so mesh exports with preserve_collections
+            # don't run rig-only logging.
+            if has_armature:
                 picked_names = self._selected_action_names()
                 added = []
                 missing = []
@@ -1252,34 +1570,52 @@ class UAL_OT_export_to_library(Operator):
                         added.append(name)
                     else:
                         missing.append(name)
-                print(
-                    f"[UL] _save_blend_backup: picker={sorted(picked_names)}, "
-                    f"added_to_save={sorted(added)}"
-                    + (f", MISSING_FROM_BPY={sorted(missing)}" if missing else "")
+                logger.debug(
+                    "_save_blend_backup: picker=%s, added_to_save=%s%s",
+                    sorted(picked_names), sorted(added),
+                    f", MISSING_FROM_BPY={sorted(missing)}" if missing else "",
                 )
+                if missing:
+                    logger.warning(
+                        "_save_blend_backup: picker references missing actions: %s",
+                        sorted(missing),
+                    )
                 action_blocks = [
                     b for b in data_blocks if isinstance(b, bpy.types.Action)
                 ]
-                print(
-                    f"[UL] _save_blend_backup: total data_blocks={len(data_blocks)}, "
-                    f"actions in data_blocks={[a.name for a in action_blocks]}"
+                logger.debug(
+                    "_save_blend_backup: total data_blocks=%d, actions=%s",
+                    len(data_blocks), [a.name for a in action_blocks],
                 )
 
-            # Write only selected data blocks to file
-            bpy.data.libraries.write(
-                filepath,
-                data_blocks,
-                path_remap='RELATIVE_ALL',
-                compress=True
+            # Pack textures so the saved .blend is portable. Without this,
+            # external image references break on other machines / library
+            # installs. Restored in finally below — user's working file
+            # state goes back to what it was before this call.
+            export_objects_in_blocks = [
+                b for b in data_blocks
+                if isinstance(b, bpy.types.Object) and b.type == 'MESH'
+            ]
+            restore_packing = self._pack_textures_for_save(
+                export_objects_in_blocks
             )
-            print(f"[UL] _save_blend_backup: wrote {filepath}")
 
-        except Exception as e:
+            try:
+                # Write only selected data blocks to file
+                bpy.data.libraries.write(
+                    filepath,
+                    data_blocks,
+                    path_remap='RELATIVE_ALL',
+                    compress=True
+                )
+                logger.debug("_save_blend_backup: wrote %s", filepath)
+            finally:
+                restore_packing()
+
+        except Exception:
             # Surface the failure instead of swallowing — best-effort meant
             # "don't abort the whole export" not "hide bugs from us".
-            import traceback
-            print(f"[UL] _save_blend_backup FAILED: {e}")
-            traceback.print_exc()
+            logger.exception("_save_blend_backup FAILED for %s", filepath)
 
     # Max dimension for textures embedded in the preview .glb. Anything larger
     # is downscaled in a temporary copy before export and restored after.
@@ -1296,7 +1632,6 @@ class UAL_OT_export_to_library(Operator):
           themselves are not exported (the viewer doesn't render joints).
         - Textures over _PREVIEW_TEXTURE_CAP² are temporarily downscaled.
         """
-        import traceback
         from pathlib import Path
 
         # Store state we may need to restore
@@ -1304,7 +1639,7 @@ class UAL_OT_export_to_library(Operator):
         original_active = context.view_layer.objects.active
 
         if not original_selection:
-            print(f"[UL] glTF preview: No objects selected, skipping")
+            logger.debug("glTF preview: no objects selected, skipping")
             return
 
         # Build the export-time selection. Rigs ship as armature + bound meshes
@@ -1319,21 +1654,21 @@ class UAL_OT_export_to_library(Operator):
             if is_rig:
                 bound_meshes = self._collect_rig_export_meshes(original_selection)
                 if not bound_meshes:
-                    print(f"[UL] glTF preview: rig has no bound meshes, skipping .glb")
+                    logger.info("glTF preview: rig has no bound meshes, skipping .glb")
                     return
 
                 armatures = [obj for obj in original_selection if obj.type == 'ARMATURE']
                 if not armatures:
-                    print(f"[UL] glTF preview: rig has no armature, skipping .glb")
+                    logger.info("glTF preview: rig has no armature, skipping .glb")
                     return
                 rig_armature = armatures[0]
 
                 # Use the explicit set the user picked in the rig dialog.
                 # Single source of truth — same set drives .blend preservation.
                 rig_action_names = self._selected_action_names()
-                print(
-                    f"[UL] glTF preview: rig actions picked: "
-                    f"{sorted(rig_action_names) or '<none>'}"
+                logger.debug(
+                    "glTF preview: rig actions picked: %s",
+                    sorted(rig_action_names) or '<none>',
                 )
 
                 # Export selection = armatures + bound meshes.
@@ -1354,7 +1689,7 @@ class UAL_OT_export_to_library(Operator):
                         obj.hide_set(False)
                         hidden_to_restore.append(obj)
 
-            print(f"[UL] glTF preview: Exporting {len(export_objects)} objects to {filepath}")
+            logger.debug("glTF preview: exporting %d objects to %s", len(export_objects), filepath)
 
             # Swap any oversized textures for downscaled copies. Returns a
             # restore callable so the user's source materials revert in finally.
@@ -1404,32 +1739,33 @@ class UAL_OT_export_to_library(Operator):
                     export_anim_single_armature=True,
                 )
                 with gltf_action_filter_session(rig_armature, rig_action_names):
-                    result = bpy.ops.export_scene.gltf(**gltf_kwargs)
+                    with _silence_native_stdout():
+                        result = bpy.ops.export_scene.gltf(**gltf_kwargs)
             else:
                 # Static meshes / collections: bake modifiers, no animation.
                 gltf_kwargs.update(
                     export_animations=False,
                     export_apply=True,             # apply modifiers
                 )
-                result = bpy.ops.export_scene.gltf(**gltf_kwargs)
+                with _silence_native_stdout():
+                    result = bpy.ops.export_scene.gltf(**gltf_kwargs)
 
-            print(f"[UL] glTF preview: Export result = {result}")
+            logger.debug("glTF preview: export result = %s", result)
 
             if Path(filepath).exists():
                 size = Path(filepath).stat().st_size
-                print(f"[UL] glTF preview: Success! File size = {size} bytes")
+                logger.debug("glTF preview: wrote %d bytes to %s", size, filepath)
             else:
-                print(f"[UL] glTF preview: WARNING - File not created at {filepath}")
+                logger.warning("glTF preview: file not created at %s", filepath)
 
-        except Exception as e:
-            print(f"[UL] glTF preview export FAILED: {e}")
-            traceback.print_exc()
+        except Exception:
+            logger.exception("glTF preview export failed")
         finally:
             # Revert any texture swaps + delete temp downscaled copies.
             try:
                 restore_textures()
-            except Exception as e:
-                print(f"[UL] glTF preview: texture restore failed: {e}")
+            except Exception:
+                logger.exception("glTF preview: texture restore failed")
 
             # Restore visibility of objects we un-hid
             for obj in hidden_to_restore:
@@ -1490,13 +1826,14 @@ class UAL_OT_export_to_library(Operator):
                     copy.name = f"_UL_PREVIEW_{original.name}"
                     copy.scale(nw, nh)
                     copies[original.name] = copy
-                    print(
-                        f"[UL] glTF preview: downscaled "
-                        f"'{original.name}' {sw}x{sh} -> {nw}x{nh}"
+                    logger.debug(
+                        "glTF preview: downscaled '%s' %dx%d -> %dx%d",
+                        original.name, sw, sh, nw, nh,
                     )
-                except Exception as e:
-                    print(f"[UL] glTF preview: downscale failed for "
-                          f"'{original.name}': {e}")
+                except Exception:
+                    logger.exception(
+                        "glTF preview: downscale failed for '%s'", original.name,
+                    )
                     continue
 
             swaps.append((node, original))
@@ -1515,6 +1852,66 @@ class UAL_OT_export_to_library(Operator):
                     bpy.data.images.remove(copy)
                 except Exception:
                     pass
+
+        return _restore
+
+    def _pack_textures_for_save(self, export_objects):
+        """Pack every external image referenced by the export objects'
+        materials so the saved `.blend` carries the texture bytes — making
+        the asset portable to other machines / library installs.
+
+        Returns a restore callable that unpacks the images we packed (via
+        method='REMOVE' — drops the packed bytes, keeps the filepath
+        reference, so the user's working file goes back to external refs).
+
+        Skips:
+        - Already-packed images (leave them as the user configured)
+        - Library-linked images (read-only, can't modify)
+        - Images without a source (no bytes to pack)
+        """
+        nodes = self._collect_image_nodes(export_objects)
+
+        # Dedupe — same image may appear in multiple nodes/materials.
+        images_seen = set()
+        packed_by_us = []  # images we packed, for restore
+
+        for node in nodes:
+            img = node.image
+            if img is None or img.name in images_seen:
+                continue
+            images_seen.add(img.name)
+
+            # Already packed → leave alone (user's intent).
+            if img.packed_file is not None:
+                continue
+            # Library-linked → can't modify.
+            if getattr(img, 'library', None) is not None:
+                logger.debug("_save_blend_backup: skipping linked image '%s'", img.name)
+                continue
+            # No filepath and not generated → nothing to pack.
+            if not img.filepath and img.source != 'GENERATED':
+                logger.debug("_save_blend_backup: '%s' has no source, skipping pack", img.name)
+                continue
+
+            try:
+                img.pack()
+                packed_by_us.append(img)
+                logger.debug(
+                    "_save_blend_backup: packed '%s' (%dx%d)",
+                    img.name, img.size[0], img.size[1],
+                )
+            except Exception:
+                logger.exception("_save_blend_backup: failed to pack '%s'", img.name)
+
+        def _restore():
+            for img in packed_by_us:
+                try:
+                    # method='REMOVE' drops the packed_file but keeps the
+                    # image's filepath reference — user's working file
+                    # goes back to external references.
+                    img.unpack(method='REMOVE')
+                except Exception:
+                    logger.exception("_save_blend_backup: failed to unpack '%s'", img.name)
 
         return _restore
 
@@ -1816,6 +2213,25 @@ class UAL_OT_export_material(Operator):
                 box.label(text="Preview:", icon='MATERIAL')
                 box.label(text="A sphere preview will be generated")
 
+    def _material_attribution_defaults(self) -> dict:
+        """M6: pull attribution defaults from addon prefs. Material export
+        doesn't surface these in its dialog (the dialog is busy with
+        material-specific bits), so we silently apply the defaults.
+        Source of truth: Preferences → Universal Library → Attribution
+        Defaults.
+        """
+        try:
+            prefs = get_preferences()
+            if prefs is None:
+                return {'author': '', 'license': None, 'copyright': None}
+            return {
+                'author': prefs.default_author or '',
+                'license': prefs._resolved_license() or None,
+                'copyright': prefs.default_copyright or None,
+            }
+        except Exception:
+            return {'author': '', 'license': None, 'copyright': None}
+
     def execute(self, context):
         """Execute the material export"""
         if not self.material_name or self.material_name == 'NONE':
@@ -1998,7 +2414,10 @@ class UAL_OT_export_material(Operator):
                 'polygon_count': 0,
                 'material_count': mat_metadata.get('material_count', 1),
                 'tags': [],
-                'author': '',
+                # M6: Attribution. Material export doesn't show a dialog
+                # for these so we silently pull from the AppData defaults —
+                # user can still edit in the metadata panel post-export.
+                **self._material_attribution_defaults(),
                 'source_application': f'Blender {bpy.app.version_string}',
                 # Versioning fields
                 'version': version,

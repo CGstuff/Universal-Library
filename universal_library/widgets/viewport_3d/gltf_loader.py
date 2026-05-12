@@ -828,6 +828,25 @@ def _normal_matrix(world: np.ndarray) -> np.ndarray:
 
 def _read_accessor(accessor: dict, buffer_views: list, bin_data: bytes,
                    as_indices: bool = False) -> Optional[np.ndarray]:
+    # KNOWN LIMITATIONS — all verified safe against Blender's gltf exporter
+    # (production exports inspected, none trigger any of these):
+    #
+    # 1. `bufferView.byteStride` is not honored. glTF allows interleaved
+    #    attributes in one bufferView with stride > element_size; we read
+    #    them as if tightly packed. External glTFs (three.js, game engines,
+    #    Khronos samples) may interleave and would load with corrupted
+    #    vertex data. Fix path: `np.lib.stride_tricks.as_strided`.
+    #
+    # 2. `accessor.normalized` is not honored. glTF allows int8/uint8/
+    #    int16/uint16 attributes with `normalized: true`, meaning values
+    #    should be divided by max_int and used as floats (compact normals,
+    #    quantized weights, etc.). We return raw integers. Fix path: when
+    #    `normalized=True` and dtype is integer, return `arr / dtype_max`
+    #    as float32.
+    #
+    # 3. `accessor.sparse` is not honored. Sparse accessors override base
+    #    data at specific indices. Used mainly for shape-key animations,
+    #    which we explicitly skip elsewhere (Phase 6 non-goal).
     bv_idx = accessor.get('bufferView')
     if bv_idx is None:
         return None

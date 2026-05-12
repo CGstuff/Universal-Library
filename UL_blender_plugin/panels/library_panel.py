@@ -7,12 +7,27 @@ Import is handled directly from the desktop app via queue system.
 
 import bpy
 from bpy.types import Panel, PropertyGroup
-from bpy.props import EnumProperty
+from bpy.props import EnumProperty, BoolProperty, FloatProperty, FloatVectorProperty
 
 from ..utils.library_connection import get_library_connection
 from ..utils.metadata_handler import has_ual_metadata, read_ual_metadata
 from ..utils.icon_loader import get_icon_id, Icons
 from ..operators.material_preview import PREVIEW_SCENE_NAME
+
+
+def _on_scale_ref_changed(self, context):
+    """Property update callback. Installs/removes the GPU draw handler when
+    `scale_ref_enabled` flips, and triggers viewport redraws for any
+    settings change."""
+    try:
+        from ..operators.scale_helper import _scale_ref_state_sync
+        _scale_ref_state_sync()
+    except Exception:
+        pass
+    for window in bpy.context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
 
 
 class UAL_SceneProperties(PropertyGroup):
@@ -25,6 +40,47 @@ class UAL_SceneProperties(PropertyGroup):
             ('ORIGIN', "World Origin", "Place at world origin (0, 0, 0)"),
         ],
         default='CURSOR'
+    )
+
+    # ---------------- Scale Reference (M5) ----------------
+    # Toggleable 1.8m human silhouette drawn in the 3D viewport next to the
+    # active object's bbox so users can eye-check asset scale pre-export.
+    # Rig-aware: when an armature is the active object, the bbox includes
+    # all bound meshes (same set rig export uses).
+    scale_ref_enabled: BoolProperty(
+        name="Scale Reference",
+        description="Draw a human silhouette next to the active object for scale comparison",
+        default=False,
+        update=_on_scale_ref_changed,
+    )
+    scale_ref_height: FloatProperty(
+        name="Reference Height (m)",
+        description="Height of the human silhouette in metres",
+        default=1.8,
+        min=0.1,
+        max=10.0,
+        soft_min=0.5,
+        soft_max=3.0,
+        precision=2,
+        unit='LENGTH',
+        update=_on_scale_ref_changed,
+    )
+    scale_ref_locked: BoolProperty(
+        name="Lock Position",
+        description=(
+            "Pin the silhouette where it is now. When unlocked the silhouette "
+            "follows the active object's bbox; when locked it stays put so you "
+            "can change selection without it jumping around."
+        ),
+        default=False,
+        update=_on_scale_ref_changed,
+    )
+    scale_ref_locked_position: FloatVectorProperty(
+        name="Locked Position",
+        description="World-space anchor used when Lock Position is on",
+        size=3,
+        subtype='TRANSLATION',
+        default=(0.0, 0.0, 0.0),
     )
 
 
@@ -74,6 +130,45 @@ class UAL_PT_main_panel(Panel):
         placement_box = layout.box()
         placement_box.label(text="Import Settings", icon='IMPORT')
         placement_box.prop(context.scene.ual_props, "import_placement", text="Place at")
+
+
+class UAL_PT_scale_reference_panel(Panel):
+    """Sub-panel for the scale-reference (M5) human silhouette."""
+    bl_label = "Scale Reference"
+    bl_idname = "UAL_PT_scale_reference_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Asset Library"
+    bl_parent_id = "UAL_PT_main_panel"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw_header(self, context):
+        # Checkbox in the panel header so users can toggle without expanding.
+        layout = self.layout
+        layout.prop(context.scene.ual_props, "scale_ref_enabled", text="")
+
+    def draw(self, context):
+        props = context.scene.ual_props
+        layout = self.layout
+        layout.active = props.scale_ref_enabled
+
+        col = layout.column(align=True)
+        col.prop(props, "scale_ref_height", text="Height")
+
+        row = layout.row(align=True)
+        row.operator(
+            "ual.lock_scale_reference",
+            text="Unlock Position" if props.scale_ref_locked else "Lock Position",
+            icon='LOCKED' if props.scale_ref_locked else 'UNLOCKED',
+        )
+
+        info_box = layout.box()
+        info_box.scale_y = 0.7
+        if props.scale_ref_locked:
+            info_box.label(text="Pinned — won't follow selection.", icon='PINNED')
+        else:
+            info_box.label(text="Follows the active object's bbox.", icon='OUTLINER_OB_EMPTY')
+        info_box.label(text="Rig-aware: armatures use bound meshes.")
 
 
 class UAL_PT_export_panel(Panel):
@@ -374,6 +469,7 @@ class UAL_PT_settings_panel(Panel):
 classes = [
     UAL_SceneProperties,
     UAL_PT_main_panel,
+    UAL_PT_scale_reference_panel,
     UAL_PT_export_panel,
     UAL_PT_material_preview_panel,
     UAL_PT_review_panel,
@@ -402,6 +498,7 @@ def unregister():
 __all__ = [
     'UAL_SceneProperties',
     'UAL_PT_main_panel',
+    'UAL_PT_scale_reference_panel',
     'UAL_PT_export_panel',
     'UAL_PT_material_preview_panel',
     'UAL_PT_review_panel',

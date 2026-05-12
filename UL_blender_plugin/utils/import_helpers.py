@@ -5,12 +5,81 @@ Standalone functions for importing assets from various file formats.
 Extracted from queue_handler.py for reusability.
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 import bpy
 
 from .blender_helpers import get_root_objects, apply_location_to_roots, select_objects, get_cursor_location
+
+logger = logging.getLogger(__name__)
+
+
+def _walk_image_nodes(tree):
+    """Yield every ShaderNodeTexImage in a node tree, recursing into groups."""
+    if tree is None:
+        return
+    for node in tree.nodes:
+        if node.bl_idname == 'ShaderNodeTexImage':
+            yield node
+        elif node.type == 'GROUP' and getattr(node, 'node_tree', None):
+            yield from _walk_image_nodes(node.node_tree)
+
+
+def _pack_imported_textures(imported_objects):
+    """After import, pack any image referenced by imported objects' materials.
+
+    Solves Blender's name-dedup behavior on append: if the user's working
+    file already has `wood.png` as external, the appended packed copy is
+    silently discarded and the imported material ends up pointing at the
+    local external image — making the work-PC path different from a fresh
+    laptop. Packing now (from disk if needed) makes the imported asset
+    self-contained either way.
+
+    Skips images that are already packed, library-linked (read-only), or
+    have no resolvable source. Per-image try/except so one bad texture
+    doesn't abort the whole pass.
+    """
+    seen = set()
+    packed_count = 0
+    failed = []
+
+    for obj in imported_objects:
+        if obj.type != 'MESH':
+            continue
+        for slot in getattr(obj, 'material_slots', []):
+            mat = slot.material
+            if not mat or not getattr(mat, 'use_nodes', False):
+                continue
+            for node in _walk_image_nodes(mat.node_tree):
+                img = node.image
+                if img is None or img.name in seen:
+                    continue
+                seen.add(img.name)
+
+                # Already packed — leave alone.
+                if img.packed_file is not None:
+                    continue
+                # Library-linked images are read-only.
+                if getattr(img, 'library', None) is not None:
+                    continue
+                # No source we can pack from.
+                if not img.filepath and img.source != 'GENERATED':
+                    continue
+
+                try:
+                    img.pack()
+                    packed_count += 1
+                except Exception as e:
+                    failed.append((img.name, str(e)))
+
+    if packed_count > 0:
+        print(f"[UL import] packed {packed_count} texture(s) into "
+              f"working file for portability")
+    if failed:
+        for name, err in failed:
+            print(f"[UL import] failed to pack '{name}': {err}")
 
 
 def _get_current_blend_path(blend_path: str) -> str:
@@ -116,6 +185,14 @@ def import_blend_file(
         # Get imported objects
         imported_objects = [bpy.data.objects[name] for name in new_object_names if name in bpy.data.objects]
 
+        # Pack textures referenced by imported materials. Blender's append
+        # silently dedups images by name — if the user's working file already
+        # has `wood.png` external, the appended packed version is discarded
+        # and the imported material points at the local external one. That
+        # makes the work-PC path different from the laptop path. Packing now
+        # ensures the imported asset is self-contained either way.
+        _pack_imported_textures(imported_objects)
+
         # If no collections were imported, link objects directly to active collection
         if not root_collections:
             for obj in imported_objects:
@@ -136,6 +213,7 @@ def import_blend_file(
         return True, imported_objects
 
     except Exception:
+        logger.exception("import_blend_as_objects failed for %s", filepath)
         return False, []
 
 
@@ -211,6 +289,7 @@ def import_blend_as_instance(
         return True, instance_empty
 
     except Exception:
+        logger.exception("import_blend_as_instance failed for %s", filepath)
         return False, None
 
 
@@ -245,6 +324,7 @@ def import_usd_file(
         return True, imported_objects
 
     except Exception:
+        logger.exception("import_usd_file failed for %s", filepath)
         return False, []
 
 
@@ -289,6 +369,7 @@ def import_material_from_blend(
         return True, imported_material
 
     except Exception:
+        logger.exception("import_material_from_blend failed for %s", filepath)
         return False, None
 
 
@@ -346,6 +427,7 @@ def import_material_from_usd(
         return True, imported_material
 
     except Exception:
+        logger.exception("import_material_from_usd failed for %s", filepath)
         return False, None
 
 
