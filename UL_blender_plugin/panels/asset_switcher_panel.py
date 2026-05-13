@@ -391,10 +391,21 @@ class UAL_PT_asset_switcher_panel(Panel):
         box = layout.box()
         box.label(text="Representations", icon='FILE_REFRESH')
 
-        # Proxy creation button
+        # Proxy creation buttons. Two flows:
+        #   - "Save Proxy Version" — saves the selected source mesh(es) as
+        #     proxy (decimate-the-original workflow).
+        #   - "Save Proxy from Source" — saves the non-active selected as a
+        #     proxy of the active source mesh (custom/cube workflow).
         row = box.row()
         row.scale_y = 1.2
         row.operator("ual.update_proxy", text="Save Proxy Version", icon='EXPORT')
+        row = box.row()
+        row.scale_y = 1.2
+        row.operator(
+            "ual.save_proxy_from_source",
+            text="Save Proxy from Source",
+            icon='UV_SYNC_SELECT',
+        )
 
         box.separator()
 

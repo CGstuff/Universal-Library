@@ -461,7 +461,73 @@ class RepresentationService:
         logger.info(
             f"Designated custom proxy {proxy_label} for {asset_name}/{variant_name}"
         )
+
+        # Broadcast so any open RepresentationsDialog auto-refreshes.
+        try:
+            from ..events.event_bus import get_event_bus
+            get_event_bus().custom_proxy_changed.emit(
+                version_group_id, variant_name,
+            )
+        except Exception:
+            logger.exception("custom_proxy_changed emit failed (non-fatal)")
+
         return True, f"Custom proxy: {proxy_label}"
+
+    def delete_custom_proxy(self, proxy_uuid: str) -> Tuple[bool, str]:
+        """Delete a custom proxy: clears its designation if it was active,
+        removes the DB row, deletes the proxy .blend / .glb / .json files,
+        and broadcasts `custom_proxy_changed` so listeners refresh.
+
+        The high-water-mark counter is intentionally NOT decremented — labels
+        are stable identities (see `proxy_counters` design).
+
+        Args:
+            proxy_uuid: Custom proxy UUID to delete.
+
+        Returns:
+            (success, message)
+        """
+        proxy = self._db.get_custom_proxy_by_uuid(proxy_uuid)
+        if not proxy:
+            return False, f"Custom proxy not found: {proxy_uuid}"
+
+        version_group_id = proxy.get('version_group_id', '')
+        variant_name = proxy.get('variant_name', 'Base')
+        proxy_label = proxy.get('proxy_label', '')
+
+        # If this proxy is the currently-designated one, clear that
+        # designation. Render designation is preserved.
+        designation = self._db.get_representation_designation(
+            version_group_id, variant_name,
+        )
+        if designation and designation.get('proxy_version_uuid') == proxy_uuid:
+            self._db.set_representation_designation(
+                version_group_id,
+                variant_name=variant_name,
+                proxy_version_uuid=None,
+                proxy_version_label=None,
+                proxy_blend_path=None,
+                render_version_uuid=designation.get('render_version_uuid'),
+                render_version_label=designation.get('render_version_label'),
+                render_blend_path=designation.get('render_blend_path'),
+                proxy_source=None,
+            )
+
+        # DB row + files (CustomProxies.delete_proxy handles file cleanup).
+        success = self._db.delete_custom_proxy(proxy_uuid)
+        if not success:
+            return False, "Database delete failed"
+
+        # Broadcast.
+        try:
+            from ..events.event_bus import get_event_bus
+            get_event_bus().custom_proxy_changed.emit(
+                version_group_id, variant_name,
+            )
+        except Exception:
+            logger.exception("custom_proxy_changed emit failed (non-fatal)")
+
+        return True, f"Deleted {proxy_label}"
 
     def clear_designations(
         self,

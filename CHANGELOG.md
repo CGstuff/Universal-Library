@@ -13,7 +13,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2.1] - 2026-05-13
+## [1.2.2] - 2026-05-13
+
+Post-`1.2.1` work focused entirely on making **custom proxies** actually usable end-to-end: a Blender authoring path that doesn't require power-user name-juggling, a `.glb` per proxy so the app can preview them in 3D, stable proxy numbering across deletions, and a Representations dialog that auto-refreshes, supports per-proxy delete, and shows a live 3D preview of the selected proxy.
+
+### Added
+
+**Save Proxy from Source (Blender)**
+- New `UAL_OT_save_proxy_from_source` operator (Object menu → *Asset Library*) — saves the active object as a custom proxy while auto-renaming it to match a designated source mesh, so `lib.reload()`'s by-name swap finds the right target
+- Two source-selection modes: pick from currently selected objects, or pick from the original asset's mesh list
+- Removes the "transfer metadata onto a cube, then remember to rename the cube before saving" trap from the artist's mental model — multi-mesh kitbash assets no longer require power-user knowledge to proxy correctly
+- Companion `UAL_OT_transfer_metadata_from_active` operator: transfers `["asset_metadata"]` custom properties from the active object onto selected objects, so artists can spread the right metadata across cubes / blockouts in one click
+
+**Per-Proxy .glb Export**
+- Both proxy-save operators (`UAL_OT_update_proxy` + `UAL_OT_save_proxy_from_source`) now bake a `.glb` alongside the `.blend` via shared `_export_proxy_glb()` helper — Draco mesh compression + WEBP textures, same pipeline as full assets
+- New `glb_path` column on `custom_proxies` table (schema v18 → v19) — backfill leaves existing proxies with `NULL` and the app shows a gentle "re-save in Blender to enable preview" hint
+- Inline 3D preview inside the Representations dialog: an embedded `AssetViewport` renders the currently-selected proxy's `.glb` in real time; selecting a different radio button loads its `.glb` instantly with no DB round-trip (path is stashed on the radio at populate time)
+
+**Per-Proxy Delete with Confirmation**
+- Each proxy row in the Representations dialog now has a × button next to the radio
+- `QMessageBox.question` confirmation explains both consequences (the `.blend` / `.glb` / `.json` sidecar / thumbnail are removed from disk) and the design choice (number won't be reused)
+- Routes through new `RepresentationService.delete_custom_proxy()` which (1) clears the active designation if this proxy was it, preserving the render designation, (2) calls `CustomProxies.delete_proxy()` for DB + file cleanup, (3) emits `custom_proxy_changed` on the event bus so any open Representations dialog auto-refreshes
+
+**Auto-Refresh on Proxy Changes**
+- New `custom_proxy_changed(version_group_id, variant_name)` event bus signal, emitted by both `RepresentationService.designate_custom_proxy()` and `delete_custom_proxy()`
+- Representations dialog subscribes on construction; signal fires → dialog checks visibility + matching asset context → emits `refresh_requested` upstream → `MetadataPanel` re-queries DB + re-populates the dialog
+- Connection stays for the dialog's lifetime (it's reused, just hidden, between asset selections) — no reconnect-on-show fragility; `isVisible()` filter keeps hidden-state fires cheap
+
+### Changed
+
+**Custom-Proxy Numbering — High-Water-Mark**
+- New `proxy_counters` table (schema migration v19) — keyed by `(version_group_id, variant_name)`, holds a monotonic `next_number` counter
+- `CustomProxies.get_next_proxy_version()` rewritten to allocate from the counter and increment, never decrement
+- Numbers are now stable identities (`p001`, `p002`, …) — once allocated, the same label never refers to a different proxy, even after the original is deleted. Cancellations leave a gap, which is acceptable; reuse would be misleading
+- Addon-side `library_connection.py` mirrors the schema + allocation behavior so a proxy authored from Blender uses the same number the app would have given it
+- Migration backfills `proxy_counters` from `MAX(proxy_version) + 1` per `(version_group_id, variant_name)` so existing libraries keep their numbering when they upgrade
+
+**Custom-Proxy Delete — File Cleanup**
+- `CustomProxies.delete_proxy()` rewritten to delete the DB row, the `.blend`, the `.glb`, the JSON sidecar (same stem, `.json` suffix), and the thumbnail file
+- DB-row delete runs first; file cleanup is best-effort behind a quiet `_unlink_quiet()` helper so a single unreadable file doesn't strand the user with an undeletable proxy in the UI
+- High-water counter is intentionally **not** decremented (see numbering note above)
+
+### Fixed
+- Custom proxy that was designated then deleted by other means (manual `.blend` removal, library cleanup) used to leave the dialog showing a stale "[Designated]" badge with no path to clear it. The new event-bus + auto-refresh pipeline catches this on the next external change
+
+---
+
+## [1.2.1] - 2026-05-12
 
 Post-`1.2.0` work covering everything since the `1.2.0` tag: texture portability, four new addon-side workflow features (header launcher, scale reference, attribution metadata, collection preservation), a guided bug-hunt across the new 3D viewport / Blender exporter / import path, plus a major refactor that kills the proxy-swap crash.
 

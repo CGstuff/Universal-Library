@@ -77,6 +77,12 @@ class EventBus(QObject):
     # Args: uuid, version_label, version_group_id, variant_name
     asset_version_created = pyqtSignal(str, str, str, str)
 
+    # Custom proxy change event — fires when a proxy is designated, the
+    # designation is cleared, or a proxy is deleted. Listeners (currently
+    # the RepresentationsDialog) re-query the DB and redraw.
+    # Args: version_group_id, variant_name
+    custom_proxy_changed = pyqtSignal(str, str)
+
     # Folder updates
     folders_loaded = pyqtSignal()
     folder_added = pyqtSignal(int)  # folder_id

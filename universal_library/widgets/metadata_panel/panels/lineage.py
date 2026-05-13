@@ -45,15 +45,24 @@ class LineagePanel(QWidget):
     # Signal emitted when user wants to clear representations
     representation_clear_requested = pyqtSignal()
 
+    # Delete a single custom proxy (.blend + .glb + DB row + sidecar)
+    proxy_delete_requested = pyqtSignal(str)  # proxy_uuid
+
+    # Re-fetch + re-populate the dialog (fired when event bus tells us an
+    # external change happened that the dialog can't resolve on its own)
+    representations_refresh_requested = pyqtSignal(str, str)  # version_group_id, variant_name
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._db_service = get_database_service()
         self._representations_dialog: Optional[RepresentationsDialog] = None
-        
+
         # Data for representations dialog
         self._versions_list: List[Dict[str, Any]] = []
         self._custom_proxies_list: List[Dict[str, Any]] = []
         self._current_designations: Dict[str, Any] = {}
+        self._version_group_id: str = ""
+        self._variant_name: str = "Base"
         
         self._setup_ui()
 
@@ -302,14 +311,18 @@ class LineagePanel(QWidget):
             self._representations_dialog.apply_requested.connect(self._on_dialog_apply)
             self._representations_dialog.regenerate_requested.connect(self._on_dialog_regenerate)
             self._representations_dialog.clear_requested.connect(self._on_dialog_clear)
-        
+            self._representations_dialog.proxy_delete_requested.connect(self._on_dialog_proxy_delete)
+            self._representations_dialog.refresh_requested.connect(self._on_dialog_refresh)
+
         # Populate with current data
         self._representations_dialog.populate(
             self._versions_list,
             self._custom_proxies_list,
-            self._current_designations
+            self._current_designations,
+            version_group_id=self._version_group_id,
+            variant_name=self._variant_name,
         )
-        
+
         self._representations_dialog.show()
         self._representations_dialog.raise_()
         self._representations_dialog.activateWindow()
@@ -325,6 +338,14 @@ class LineagePanel(QWidget):
     def _on_dialog_clear(self):
         """Handle clear from dialog."""
         self.representation_clear_requested.emit()
+
+    def _on_dialog_proxy_delete(self, proxy_uuid: str):
+        """Bubble proxy deletion up to the metadata panel."""
+        self.proxy_delete_requested.emit(proxy_uuid)
+
+    def _on_dialog_refresh(self, version_group_id: str, variant_name: str):
+        """Bubble dialog-driven refresh request up to the metadata panel."""
+        self.representations_refresh_requested.emit(version_group_id, variant_name)
 
     def display(self, asset: Dict[str, Any], unresolved_count: int = 0):
         """Display asset lineage info."""
@@ -498,13 +519,17 @@ class LineagePanel(QWidget):
             self._representations_dialog.populate(
                 self._versions_list,
                 self._custom_proxies_list,
-                designations
+                designations,
+                version_group_id=self._version_group_id,
+                variant_name=self._variant_name,
             )
 
     def populate_version_dropdowns(
         self,
         versions: List[Dict[str, Any]],
-        custom_proxies: Optional[List[Dict[str, Any]]] = None
+        custom_proxies: Optional[List[Dict[str, Any]]] = None,
+        version_group_id: str = "",
+        variant_name: str = "Base",
     ):
         """
         Store version and proxy data for the representations dialog.
@@ -512,9 +537,17 @@ class LineagePanel(QWidget):
         Args:
             versions: List of version dicts
             custom_proxies: List of custom proxy dicts
+            version_group_id: Asset's version group id (forwarded to the
+                dialog so its event-bus filter and delete-confirmation
+                messages know which asset they're acting on)
+            variant_name: Variant name (same purpose)
         """
         self._versions_list = versions or []
         self._custom_proxies_list = custom_proxies or []
+        if version_group_id:
+            self._version_group_id = version_group_id
+        if variant_name:
+            self._variant_name = variant_name
 
     def clear(self):
         """Clear display."""
@@ -536,6 +569,8 @@ class LineagePanel(QWidget):
         self._versions_list = []
         self._custom_proxies_list = []
         self._current_designations = {}
+        self._version_group_id = ""
+        self._variant_name = "Base"
 
 
 __all__ = ['LineagePanel']

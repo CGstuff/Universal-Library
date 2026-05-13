@@ -66,6 +66,7 @@ from .representation_swap import (
 )
 from .update_proxy import (
     UAL_OT_update_proxy,
+    UAL_OT_save_proxy_from_source,
 )
 from .update_thumbnail import (
     UAL_OT_update_thumbnail,
@@ -73,6 +74,9 @@ from .update_thumbnail import (
 )
 from .scale_helper import (
     UAL_OT_lock_scale_reference,
+)
+from .transfer_metadata import (
+    UAL_OT_transfer_metadata_from_active,
 )
 
 # For registration
@@ -92,6 +96,7 @@ from . import representation_swap
 from . import update_proxy
 from . import update_thumbnail
 from . import scale_helper
+from . import transfer_metadata
 
 
 def register():
@@ -111,9 +116,11 @@ def register():
     update_proxy.register()
     update_thumbnail.register()
     scale_helper.register()
+    transfer_metadata.register()
 
 
 def unregister():
+    transfer_metadata.unregister()
     scale_helper.unregister()
     update_thumbnail.unregister()
     update_proxy.unregister()
@@ -168,9 +175,11 @@ __all__ = [
     'UAL_OT_restore_representation',
     'UAL_OT_restore_representation_selected',
     'UAL_OT_update_proxy',
+    'UAL_OT_save_proxy_from_source',
     'UAL_OT_update_thumbnail',
     'UAL_OT_toggle_thumbnail_helper',
     'UAL_OT_lock_scale_reference',
+    'UAL_OT_transfer_metadata_from_active',
     'register',
     'unregister',
 ]

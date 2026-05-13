@@ -24,7 +24,7 @@ class SchemaManager:
     while preserving existing data.
     """
 
-    SCHEMA_VERSION = 18  # M6: Attribution (license + copyright columns)
+    SCHEMA_VERSION = 19  # Proxy improvements: high-water counter + glb_path
 
     def __init__(self, connection: sqlite3.Connection):
         """
@@ -299,6 +299,7 @@ class SchemaManager:
         self._create_app_settings_table(cursor)
         self._create_representation_designations_table(cursor)
         self._create_custom_proxies_table(cursor)
+        self._create_proxy_counters_table(cursor)
         self._create_migration_status_table(cursor)
 
         # Migrate representation_designations for v16
@@ -535,6 +536,7 @@ class SchemaManager:
                 proxy_version INTEGER NOT NULL DEFAULT 1,
                 proxy_label TEXT NOT NULL DEFAULT 'p001',
                 blend_path TEXT,
+                glb_path TEXT,
                 thumbnail_path TEXT,
                 polygon_count INTEGER,
                 notes TEXT DEFAULT '',
@@ -550,6 +552,42 @@ class SchemaManager:
             'CREATE INDEX IF NOT EXISTS idx_custom_proxies_uuid '
             'ON custom_proxies(uuid)'
         )
+
+        # Existing-DB migration: add glb_path column if missing.
+        cursor.execute("PRAGMA table_info(custom_proxies)")
+        existing = {col[1] for col in cursor.fetchall()}
+        if 'glb_path' not in existing:
+            cursor.execute('ALTER TABLE custom_proxies ADD COLUMN glb_path TEXT')
+
+    def _create_proxy_counters_table(self, cursor: sqlite3.Cursor):
+        """Create proxy_counters: monotonic per-asset-variant proxy version counter.
+
+        Labels (p001, p002, ...) are *identity*: once a number is handed out,
+        it's never reused even if that proxy is deleted. This avoids the
+        "p002 used to be the cube, now it's the decimated" confusion. The
+        counter advances on every `get_next_proxy_version` call; deletes
+        leave it untouched.
+
+        Backfilled on first migration from existing custom_proxies so a
+        pre-existing library with p001/p002/p003 continues at p004.
+        """
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS proxy_counters (
+                version_group_id TEXT NOT NULL,
+                variant_name TEXT NOT NULL DEFAULT 'Base',
+                next_number INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (version_group_id, variant_name)
+            )
+        ''')
+        # Backfill: for each (version_group_id, variant_name) that already
+        # has proxies, set next_number = max(proxy_version) + 1.
+        # INSERT OR IGNORE so re-running the migration is a no-op.
+        cursor.execute('''
+            INSERT OR IGNORE INTO proxy_counters (version_group_id, variant_name, next_number)
+            SELECT version_group_id, variant_name, MAX(proxy_version) + 1
+            FROM custom_proxies
+            GROUP BY version_group_id, variant_name
+        ''')
 
     def _migrate_representation_designations_v16(self, cursor: sqlite3.Cursor):
         """Add proxy_source column to representation_designations (schema v16)."""

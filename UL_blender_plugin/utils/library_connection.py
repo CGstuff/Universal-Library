@@ -663,10 +663,11 @@ class LibraryConnection:
 
     def _ensure_custom_proxies_table(self):
         """
-        Create custom_proxies table if it doesn't exist.
+        Create custom_proxies + proxy_counters tables if they don't exist.
 
-        Forward-compatible: the Blender addon creates the table if the
-        desktop app hasn't run schema migration yet.
+        Forward-compatible: the Blender addon creates the tables if the
+        desktop app hasn't run schema migration yet. Also performs an
+        idempotent ADD COLUMN for glb_path on existing DBs.
         """
         if not self._connection:
             self.connect()
@@ -684,12 +685,38 @@ class LibraryConnection:
                 proxy_version INTEGER NOT NULL DEFAULT 1,
                 proxy_label TEXT NOT NULL DEFAULT 'p001',
                 blend_path TEXT,
+                glb_path TEXT,
                 thumbnail_path TEXT,
                 polygon_count INTEGER,
                 notes TEXT DEFAULT '',
                 created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(version_group_id, variant_name, proxy_version)
             )
+        ''')
+        # Idempotent column add for pre-v19 DBs that already had the table.
+        cursor.execute("PRAGMA table_info(custom_proxies)")
+        existing_cols = {col[1] for col in cursor.fetchall()}
+        if 'glb_path' not in existing_cols:
+            try:
+                cursor.execute('ALTER TABLE custom_proxies ADD COLUMN glb_path TEXT')
+            except Exception:
+                pass
+
+        # High-water-mark counter (mirrors the app's schema v19 table).
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS proxy_counters (
+                version_group_id TEXT NOT NULL,
+                variant_name TEXT NOT NULL DEFAULT 'Base',
+                next_number INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (version_group_id, variant_name)
+            )
+        ''')
+        # Backfill so counters start at max(existing proxy_version) + 1.
+        cursor.execute('''
+            INSERT OR IGNORE INTO proxy_counters (version_group_id, variant_name, next_number)
+            SELECT version_group_id, variant_name, MAX(proxy_version) + 1
+            FROM custom_proxies
+            GROUP BY version_group_id, variant_name
         ''')
         self._connection.commit()
 
@@ -739,17 +766,19 @@ class LibraryConnection:
         variant_name: str = 'Base'
     ) -> int:
         """
-        Get the next proxy version number.
+        Allocate the next proxy version number via the high-water counter.
 
-        DEPRECATED: Custom proxies (p001, p002) legacy format.
-        Use update_proxy operator instead for new proxy saves.
+        Identical semantics to `CustomProxies.get_next_proxy_version` on
+        the app side: numbers are monotonic per (version_group_id, variant)
+        and never reused after deletion. Reads and increments the
+        `proxy_counters` row atomically.
 
         Args:
             version_group_id: Version group identifier
             variant_name: Variant name
 
         Returns:
-            Next version number (1 if none exist)
+            Next version number (1 for the first proxy of a new variant)
         """
         if not self._connection:
             self.connect()
@@ -759,12 +788,26 @@ class LibraryConnection:
         try:
             cursor = self._connection.cursor()
             cursor.execute('''
-                SELECT MAX(proxy_version) FROM custom_proxies
+                SELECT next_number FROM proxy_counters
                 WHERE version_group_id = ? AND variant_name = ?
             ''', (version_group_id, variant_name))
             row = cursor.fetchone()
-            max_version = row[0] if row and row[0] is not None else 0
-            return max_version + 1
+            if row is not None:
+                next_num = int(row[0])
+                cursor.execute('''
+                    UPDATE proxy_counters
+                    SET next_number = next_number + 1
+                    WHERE version_group_id = ? AND variant_name = ?
+                ''', (version_group_id, variant_name))
+            else:
+                next_num = 1
+                cursor.execute('''
+                    INSERT INTO proxy_counters
+                        (version_group_id, variant_name, next_number)
+                    VALUES (?, ?, 2)
+                ''', (version_group_id, variant_name))
+            self._connection.commit()
+            return next_num
         except Exception:
             return 1
 

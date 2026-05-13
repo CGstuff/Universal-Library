@@ -53,6 +53,18 @@ class UAL_MT_header_menu(bpy.types.Menu):
 
         layout.separator()
 
+        # Power-user: transfer UAL metadata from the active object to all
+        # other selected. Gated by the operator's poll (active must have
+        # metadata + at least one other selected object) so it greys out
+        # when the workflow doesn't apply.
+        layout.operator(
+            "ual.transfer_metadata_from_active",
+            text="Transfer Metadata from Active",
+            icon='LINKED',
+        )
+
+        layout.separator()
+
         # Addon's top-level package matches UAL_Preferences.bl_idname (set via __package__).
         # Here __package__ is 'UL_blender_plugin.panels'; we want the root 'UL_blender_plugin'.
         layout.operator(

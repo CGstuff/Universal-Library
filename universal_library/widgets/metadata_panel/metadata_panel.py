@@ -136,6 +136,8 @@ class MetadataPanel(QWidget):
         self._lineage_panel.representation_apply_requested.connect(self._on_representation_apply)
         self._lineage_panel.representation_regenerate_requested.connect(self._on_representation_regenerate)
         self._lineage_panel.representation_clear_requested.connect(self._on_representation_clear)
+        self._lineage_panel.proxy_delete_requested.connect(self._on_proxy_delete)
+        self._lineage_panel.representations_refresh_requested.connect(self._on_representations_refresh)
         self._layout.addWidget(self._lineage_panel)
 
         # Technical info section
@@ -754,7 +756,12 @@ class MetadataPanel(QWidget):
             custom_proxies = self._db_service.get_custom_proxies(version_group_id, variant_name)
 
             if versions:
-                self._lineage_panel.populate_version_dropdowns(versions, custom_proxies)
+                self._lineage_panel.populate_version_dropdowns(
+                    versions,
+                    custom_proxies,
+                    version_group_id=version_group_id,
+                    variant_name=variant_name,
+                )
 
             # Get and display current designations
             designations = rep_service.get_effective_designations(version_group_id, variant_name)
@@ -870,6 +877,53 @@ class MetadataPanel(QWidget):
 
         if self._current_uuid:
             self.display_asset(self._current_uuid)
+
+    def _on_proxy_delete(self, proxy_uuid: str):
+        """Handle delete of a single custom proxy.
+
+        Routed through RepresentationService.delete_custom_proxy which (a)
+        clears the active designation if this proxy was it, (b) removes
+        the DB row + files on disk, and (c) emits ``custom_proxy_changed``
+        on the event bus so the dialog auto-refreshes via its own listener.
+        """
+        if not proxy_uuid:
+            return
+        try:
+            from ...services.representation_service import get_representation_service
+            rep_service = get_representation_service()
+            success, msg = rep_service.delete_custom_proxy(proxy_uuid)
+            if not success:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Delete Proxy", f"Could not delete proxy:\n{msg}")
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Delete Proxy", f"Error deleting proxy:\n{e}")
+
+        # The event-bus signal will trigger the dialog refresh; we also
+        # refresh the asset display so badges (.proxy.blend ✓) stay current.
+        if self._current_uuid:
+            self.display_asset(self._current_uuid)
+
+    def _on_representations_refresh(self, version_group_id: str, variant_name: str):
+        """Re-fetch versions/proxies/designations and re-populate the dialog.
+
+        Fired by the dialog when it spots an event-bus change for the
+        asset currently shown. We're the level that owns DB access — the
+        dialog itself is presentation-only.
+        """
+        if not self._current_asset:
+            return
+        # Only handle if the signal matches what we're currently showing —
+        # otherwise we'd race with an asset switch that already updated.
+        current_vgid = (
+            self._current_asset.get('version_group_id')
+            or self._current_asset.get('asset_id')
+            or self._current_uuid
+        )
+        current_variant = self._current_asset.get('variant_name', 'Base')
+        if version_group_id != current_vgid or variant_name != current_variant:
+            return
+        self._update_representation_display(self._current_asset)
 
     def _on_enlarge_3d_requested(self, glb_path: str):
         """Open the enlarged 3D viewer for the current asset."""
