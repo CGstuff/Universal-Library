@@ -207,6 +207,21 @@ class UAL_PT_export_panel(Panel):
                     row = layout.row(align=True)
                     row.operator("ual.export_material", text="Export Material", icon='MATERIAL')
                     row.operator("ual.open_material_preview", text="", icon='RESTRICT_RENDER_OFF')
+
+                    # Update-thumbnail button. Shown only if at least one
+                    # library-imported material is on this object — the
+                    # operator wouldn't have anything to do otherwise.
+                    from ..utils.metadata_handler import has_material_metadata
+                    has_library_mat = any(
+                        slot.material and has_material_metadata(slot.material)
+                        for slot in obj.material_slots
+                    )
+                    if has_library_mat:
+                        layout.operator(
+                            "ual.update_material_thumbnail",
+                            text="Update Material Thumbnail",
+                            icon='IMAGE_DATA',
+                        )
         else:
             layout.label(text="Select objects to export", icon='INFO')
 

@@ -24,7 +24,7 @@ class SchemaManager:
     while preserving existing data.
     """
 
-    SCHEMA_VERSION = 19  # Proxy improvements: high-water counter + glb_path
+    SCHEMA_VERSION = 21  # Rig metadata realignment: animation_count + bound_mesh_count
 
     def __init__(self, connection: sqlite3.Connection):
         """
@@ -60,13 +60,27 @@ class SchemaManager:
 
             if current_version == 0:
                 self._create_schema(cursor)
+            else:
+                # Run migrations for existing databases
+                self._run_migrations(cursor, current_version)
+
+            # Record the schema version we just brought the DB up to.
+            # Previously this only fired for new DBs, so existing DBs
+            # would have migrations re-run idempotently on every launch
+            # while the schema_version row stayed stuck at whatever it
+            # was last "officially" set to (often years out of date).
+            # Users could not tell whether migrations had actually
+            # applied without manually inspecting PRAGMA table_info.
+            if current_version != self.SCHEMA_VERSION:
                 cursor.execute(
                     'INSERT OR REPLACE INTO schema_version (version) VALUES (?)',
                     (self.SCHEMA_VERSION,)
                 )
-            else:
-                # Run migrations for existing databases
-                self._run_migrations(cursor, current_version)
+                if current_version > 0:
+                    logger.info(
+                        "Schema upgraded: v%d -> v%d",
+                        current_version, self.SCHEMA_VERSION,
+                    )
 
             # Always ensure root folder exists
             self._ensure_root_folder(cursor)
@@ -217,14 +231,27 @@ class SchemaManager:
             'published_date': 'TIMESTAMP',
             'published_by': 'TEXT',
             'bone_count': 'INTEGER',
-            'has_facial_rig': 'INTEGER DEFAULT 0',
+            'has_facial_rig': 'INTEGER DEFAULT 0',  # Kept for back-compat; not surfaced
             'control_count': 'INTEGER',
+            # Rig metadata realignment (v21). Rigs are armature + bound
+            # meshes + animations; these surface what actually matters.
+            'animation_count': 'INTEGER',
+            'bound_mesh_count': 'INTEGER',
             'frame_start': 'INTEGER',
             'frame_end': 'INTEGER',
             'frame_rate': 'REAL',
             'is_loop': 'INTEGER DEFAULT 0',
             'texture_maps': 'TEXT',
             'texture_resolution': 'TEXT',
+            # Material structural fingerprint (v20). Shader-agnostic
+            # diff fields — work for any material regardless of root
+            # shader type. See metadata_collector._node_tree_fingerprint.
+            'material_node_count': 'INTEGER',
+            'material_node_group_count': 'INTEGER',
+            'material_texture_count': 'INTEGER',
+            'material_unique_node_types': 'TEXT',  # JSON array
+            'material_blend_method': 'TEXT',
+            'material_backface_cull': 'INTEGER',
             'light_type': 'TEXT',
             'light_count': 'INTEGER',
             'camera_type': 'TEXT',
@@ -739,6 +766,8 @@ class SchemaManager:
             # Rig category
             ('bone_count', 'Bone Count', 'integer', 'number', 'rig', 10),
             ('control_count', 'Control Count', 'integer', 'number', 'rig', 20),
+            ('animation_count', 'Animations', 'integer', 'number', 'rig', 25),
+            ('bound_mesh_count', 'Bound Meshes', 'integer', 'number', 'rig', 28),
             ('has_facial_rig', 'Has Facial Rig', 'boolean', 'checkbox', 'rig', 30),
             # Animation category
             ('frame_start', 'Frame Start', 'integer', 'number', 'animation', 10),
@@ -748,6 +777,12 @@ class SchemaManager:
             # Material category
             ('texture_maps', 'Texture Maps', 'json', 'text', 'material', 10),
             ('texture_resolution', 'Texture Resolution', 'string', 'text', 'material', 20),
+            ('material_node_count', 'Node Count', 'integer', 'number', 'material', 30),
+            ('material_node_group_count', 'Node Groups', 'integer', 'number', 'material', 40),
+            ('material_texture_count', 'Texture Count', 'integer', 'number', 'material', 50),
+            ('material_unique_node_types', 'Unique Node Types', 'json', 'text', 'material', 60),
+            ('material_blend_method', 'Blend Method', 'string', 'text', 'material', 70),
+            ('material_backface_cull', 'Backface Culling', 'boolean', 'checkbox', 'material', 80),
             # Mesh extended
             ('vertex_group_count', 'Vertex Groups', 'integer', 'number', 'mesh', 60),
             ('shape_key_count', 'Shape Keys', 'integer', 'number', 'mesh', 70),
@@ -832,6 +867,8 @@ class SchemaManager:
             # Rig category
             ('bone_count', 'Bone Count', 'integer', 'number', 'rig', 10),
             ('control_count', 'Control Count', 'integer', 'number', 'rig', 20),
+            ('animation_count', 'Animations', 'integer', 'number', 'rig', 25),
+            ('bound_mesh_count', 'Bound Meshes', 'integer', 'number', 'rig', 28),
             ('has_facial_rig', 'Has Facial Rig', 'boolean', 'checkbox', 'rig', 30),
             # Animation category
             ('frame_start', 'Frame Start', 'integer', 'number', 'animation', 10),
@@ -841,6 +878,12 @@ class SchemaManager:
             # Material category
             ('texture_maps', 'Texture Maps', 'json', 'text', 'material', 10),
             ('texture_resolution', 'Texture Resolution', 'string', 'text', 'material', 20),
+            ('material_node_count', 'Node Count', 'integer', 'number', 'material', 30),
+            ('material_node_group_count', 'Node Groups', 'integer', 'number', 'material', 40),
+            ('material_texture_count', 'Texture Count', 'integer', 'number', 'material', 50),
+            ('material_unique_node_types', 'Unique Node Types', 'json', 'text', 'material', 60),
+            ('material_blend_method', 'Blend Method', 'string', 'text', 'material', 70),
+            ('material_backface_cull', 'Backface Culling', 'boolean', 'checkbox', 'material', 80),
             # Mesh extended
             ('vertex_group_count', 'Vertex Groups', 'integer', 'number', 'mesh', 60),
             ('shape_key_count', 'Shape Keys', 'integer', 'number', 'mesh', 70),

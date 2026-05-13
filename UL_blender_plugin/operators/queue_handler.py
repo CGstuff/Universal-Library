@@ -94,7 +94,8 @@ class UAL_OT_check_import_queue(Operator):
             # Handle material imports specially
             if asset_type == 'material':
                 success = self._handle_material_import(
-                    context, blend_file_path, usd_file_path, asset_name
+                    context, blend_file_path, usd_file_path, asset_name,
+                    request,
                 )
             else:
                 # Standard asset import using helper
@@ -368,14 +369,39 @@ class UAL_OT_check_import_queue(Operator):
         context,
         blend_file_path: str,
         usd_file_path: str,
-        asset_name: str
+        asset_name: str,
+        request: dict,
     ) -> bool:
-        """Handle material-specific import logic"""
+        """Handle material-specific import logic.
+
+        Forwards the queue request's asset fields to the helper so the
+        imported material datablock gets stamped with UAL metadata.
+        Without this, a material dragged in via the app in a fresh
+        Blender file would have no library lineage — so the export
+        operator would see it as a brand-new material and refuse to
+        offer the "new version" path. (This is the root cause of
+        "I can only version materials in the same session.")
+        """
         selected_meshes = [obj for obj in context.selected_objects if obj.type == 'MESH']
+
+        # Translate the queue request's field names into what
+        # store_material_metadata expects. The queue uses `asset_uuid`
+        # for the per-version UUID; metadata_handler reads `uuid`.
+        asset_metadata = {
+            'uuid': request.get('asset_uuid', '') or '',
+            'version_group_id': request.get('version_group_id') or request.get('asset_uuid', '') or '',
+            'version': request.get('version', 1) or 1,
+            'version_label': request.get('version_label', 'v001') or 'v001',
+            'name': request.get('asset_name', '') or asset_name,
+            'asset_id': request.get('asset_id') or request.get('version_group_id') or request.get('asset_uuid', '') or '',
+            'variant_name': request.get('variant_name') or 'Base',
+        }
 
         if blend_file_path and Path(blend_file_path).exists():
             success, material = import_material_from_blend(
-                context, blend_file_path, apply_to_selection=bool(selected_meshes)
+                context, blend_file_path,
+                apply_to_selection=bool(selected_meshes),
+                asset_metadata=asset_metadata,
             )
             if success and material:
                 if selected_meshes:
@@ -386,7 +412,9 @@ class UAL_OT_check_import_queue(Operator):
 
         elif usd_file_path and Path(usd_file_path).exists():
             success, material = import_material_from_usd(
-                context, usd_file_path, apply_to_selection=bool(selected_meshes)
+                context, usd_file_path,
+                apply_to_selection=bool(selected_meshes),
+                asset_metadata=asset_metadata,
             )
             if success and material:
                 if selected_meshes:

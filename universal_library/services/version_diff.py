@@ -483,6 +483,8 @@ FIELD_REGISTRY: Dict[str, DiffShape] = {
     'armature_count':          NumericDiff('Armatures',                       short_label='armatures'),
     'bone_count':              NumericDiff('Bones',                           short_label='bones'),
     'control_count':           NumericDiff('Controls',                        short_label='ctrls'),
+    'animation_count':         NumericDiff('Animations',                      short_label='anims'),
+    'bound_mesh_count':        NumericDiff('Bound meshes',                    short_label='meshes'),
     'point_count':             NumericDiff('Points',                          short_label='points'),
     'spline_count':            NumericDiff('Splines',                         short_label='splines'),
     'layer_count':             NumericDiff('Layers',                          short_label='layers'),
@@ -527,6 +529,17 @@ FIELD_REGISTRY: Dict[str, DiffShape] = {
 
     # Sets
     'texture_maps':            SetDiff('Texture maps', short_label='maps'),
+    'material_unique_node_types': SetDiff('Node types', short_label='node types'),
+
+    # Material structural-diff fields (v20). Shader-agnostic counts
+    # surfaced as a coarse graph-complexity signal — works for any
+    # material regardless of whether it's Principled, Mix Shader, or
+    # fully procedural. Same approach will extend to GN later.
+    'material_node_count':       NumericDiff('Nodes',         short_label='nodes'),
+    'material_node_group_count': NumericDiff('Node groups',   short_label='groups'),
+    'material_texture_count':    NumericDiff('Textures',      short_label='tex'),
+    'material_blend_method':     CategoricalDiff('Blend method'),
+    'material_backface_cull':    BooleanDiff('Backface culling', short_label='backface'),
 
     # Dimensional (bbox, multi-field)
     'bbox':                    DimensionalDiff('Bbox', axes=('bbox_x', 'bbox_y', 'bbox_z')),
@@ -535,14 +548,35 @@ FIELD_REGISTRY: Dict[str, DiffShape] = {
 
 TYPE_FIELDS: Dict[str, List[str]] = {
     'mesh': [
-        'polygon_count', 'material_count', 'vertex_group_count', 'shape_key_count',
-        'has_skeleton', 'has_animations', 'bone_count', 'has_facial_rig', 'bbox',
+        # A pure mesh: geometry + materials + paint data. Skeleton /
+        # animations / facial-rig dropped — those are rig concerns.
+        'polygon_count', 'material_count', 'object_count',
+        'vertex_group_count', 'shape_key_count', 'bbox',
     ],
     'rig': [
-        'bone_count', 'control_count', 'has_facial_rig', 'shape_key_count',
+        # A rig is armature + bound meshes + animations. Cover all three:
+        # bones/controls describe the skeleton, polygons/materials/
+        # bound_mesh describe the skin, animation_count describes the
+        # motion shipped with it.
+        'bone_count', 'control_count', 'animation_count',
+        'polygon_count', 'material_count', 'bound_mesh_count',
+        'shape_key_count', 'bbox',
     ],
     'material': [
-        'texture_maps', 'texture_resolution', 'material_count',
+        # Structural fingerprint (shader-agnostic — captures the real
+        # change between iterations of a complex shader: more nodes,
+        # added a Voronoi, swapped texture count, etc.)
+        'material_node_count',
+        'material_node_group_count',
+        'material_texture_count',
+        'material_unique_node_types',
+        # What the material is plugged into / how it renders
+        'texture_maps',
+        'texture_resolution',
+        'material_blend_method',
+        'material_backface_cull',
+        # NOTE: material_count was dropped — always 1 for a material
+        # asset, so the diff was always 'unchanged' and added no signal.
     ],
     'light': [
         'light_type', 'light_count', 'light_power', 'light_color',

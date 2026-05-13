@@ -70,6 +70,7 @@ from .update_proxy import (
 )
 from .update_thumbnail import (
     UAL_OT_update_thumbnail,
+    UAL_OT_update_material_thumbnail,
     UAL_OT_toggle_thumbnail_helper,
 )
 from .scale_helper import (
@@ -177,6 +178,7 @@ __all__ = [
     'UAL_OT_update_proxy',
     'UAL_OT_save_proxy_from_source',
     'UAL_OT_update_thumbnail',
+    'UAL_OT_update_material_thumbnail',
     'UAL_OT_toggle_thumbnail_helper',
     'UAL_OT_lock_scale_reference',
     'UAL_OT_transfer_metadata_from_active',

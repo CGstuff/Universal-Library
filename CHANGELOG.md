@@ -13,6 +13,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.3] - 2026-05-13
+
+Post-`1.2.2` work focused on **materials**, **rigs**, and **diff fidelity**. Material versioning across sessions now actually works (the queue-import path was silently dropping UAL metadata, so a material dragged into a fresh Blender file had no library lineage and couldn't be versioned). Rig metadata in the app was inaccurate-by-omission — a rigged hero character read as "10 bones, 0 polygons" because the export captured only the armature. Both reframed so the metadata panel reflects what the asset actually is, not what's literally selected at export time. Plus a long-standing schema-migration footgun fixed.
+
+### Added
+
+**Material — Update Thumbnail without re-export**
+- New `UAL_OT_update_material_thumbnail` operator (N-panel → *Asset Library* → Export, shown when the active object has any library-imported material)
+- Captures the **current 3D viewport** (not the bundled preview-sphere scene), so artists can flip viewport to Rendered + transparent film, frame their own object, and re-snap the thumbnail without doing a full re-export
+- Refreshes `thumbnail.{version_label}.png` + `thumbnail.current.png` and updates the DB row's `thumbnail_path`
+- Auto-redirects to the **latest** version of the chain when the in-scene material's UUID points to an archived version (common when v2/v3 have been pushed since the artist last imported v1) — reports the redirect in the success message so the user understands what happened
+
+**Material — Name-collision check on export**
+- Material export was the only asset type without the name-collision gate that mesh/rig/scene/collection already had — closed the gap
+- Saving a new material whose auto-name collides with an existing library material now hard-errors with the same message: *"A material asset named 'X' already exists! Please choose a different name, or use 'New Version' to add a version."*
+- Closes the "edit one material, the other updates" symptom that came from two library rows sharing a name
+
+**Material — Structural diff fields**
+- Six new shader-agnostic fields drive the material version-diff panel: `material_node_count`, `material_node_group_count`, `material_texture_count`, `material_unique_node_types`, `material_blend_method`, `material_backface_cull`
+- Read via a generic `_node_tree_fingerprint(tree)` helper in the collector that walks any NodeTree recursively (counts nodes, node groups, image textures, distinct `bl_idname`s). Designed to extend to Geometry Nodes assets later — same helper, different consumer
+- Diff panel surfaces lines like `Nodes: 47 → 53 (+6)`, `Node types: +ShaderNodeVoronoiTex, +ShaderNodeColorRamp`, `Blend method: OPAQUE → CLIP`
+- Deliberately avoids reading Principled BSDF defaults (base color, roughness, metallic) — the library-worthy materials are complex shaders where those defaults are downstream of 30 nodes and meaningless. Structural fingerprints work for any shader: Principled, Mix Shader, Glass, fully procedural
+- Schema v19 → v20 with idempotent migrations on both app side ([schema_manager.py](../Universal-Library_private/universal_library/services/schema_manager.py)) and addon side ([library_connection.py](../Universal-Library_private/UL_blender_plugin/utils/library_connection.py))
+
+**Material — Color-swatch renderer in diff panel**
+- Color fields in the version diff now render as a 16×16 filled rectangle + hex string + arrow + rectangle, instead of the previous `#FF8800 → #00AAFF` text-only form
+- Empty/invalid hex falls back to a neutral gray placeholder so row width stays consistent
+- Hooked up at the renderer level — fires automatically the moment any future `ColorDiff` field lands in `TYPE_FIELDS`
+
+**Rig — Metadata realignment (the rig IS its meshes too)**
+- `collect_rig_metadata` rewritten to capture the rig as a complete asset: armature **plus** bound meshes **plus** picked animations
+- Walks the entire scene to find every mesh bound to one of the selected armatures — via Armature-modifier target OR direct parenting (matches the same resolver the rig export already uses for the saved `.blend`). User can select just the armature and still get accurate poly/material/bound-mesh counts
+- New captured fields: `polygon_count` (sum across bound meshes), `material_count`, `bound_mesh_count`, `shape_key_count`, `vertex_group_count`, `animation_count` (from the picker)
+- `animation_count` reads as `Animations: 10` when populated, `Animations: N/A` when the rig has no shipped actions — replaces the cryptic `Has Animations: Yes/No` boolean
+- Schema v20 → v21 with new `animation_count` + `bound_mesh_count` columns
+
+**Mesh — Object count**
+- New `Objects: N` row in the mesh metadata panel — surfaces only when N > 1 (single-object meshes stay silent). Lets the artist tell "single hero prop" from "47-piece kitbash" at a glance
+- Data was already captured by the export operator; just wired into the panel + `TYPE_FIELDS['mesh']`
+
+**Blender — Import always appends material slots (never overwrites)**
+- Material import (both `.blend` and USD paths in `import_helpers.py`) now always `append`s to the target mesh's material slots instead of replacing slot 0
+- On a mesh with zero materials this still creates slot 0; on a mesh that already has materials, the imported one lands at the end as a new slot. Imports are additive, never destructive
+
+### Changed
+
+**Mesh panel — drops rig/animation fields**
+- Mesh metadata panel no longer surfaces `Skeleton`, `Animations`, `Facial Rig`, or `Bones` — those belong to rigs. A pure mesh has no skeleton; if it does, the asset should have been classified as a rig.
+- `TYPE_FIELDS['mesh']` in the diff registry trimmed to match: `polygon_count`, `material_count`, `object_count`, `vertex_group_count`, `shape_key_count`, `bbox`
+
+**Rig panel — drops Facial Rig (unreliable heuristic)**
+- `has_facial_rig` was a name-keyword sniff (`"jaw" in bone.name.lower()`) that was wrong as often as it was right. Dropped from the rig metadata panel and from `TYPE_FIELDS['rig']`. The DB column is kept for back-compat but no longer surfaced anywhere
+- New rig panel shows: Bones, Controls, Animations, Polygons, Materials, Bound Meshes, Shape Keys (with `N/A` fallback for any field whose value is missing on pre-v21 rigs — so the structure is visible immediately without forcing a re-export)
+
+**Blender — Material export dialog no longer clobbers user's NEW_ASSET choice**
+- `_check_material_metadata` was called from `draw()` on every dialog redraw (mouse moves, focus changes) and unconditionally re-set `export_mode = 'NEW_VERSION'`. So a user manually flipping the radio to NEW_ASSET — to fork a duplicated material as a separate asset — would silently lose their choice on the next redraw
+- Fixed via a `last_checked_material` tracker: the metadata-detection still runs on every draw, but `export_mode` is only seeded when the material selection actually changes
+
+**Blender — Material export recovers from partial metadata**
+- The "new version" path requires both a `version_group_id` (which chain to extend) and a `source_uuid` (which row to archive as v_old). Materials imported by older addon versions or via paths that didn't fully stamp metadata had vgid but no uuid → the previous-version archival was skipped → DB ended up with two `is_latest=1` rows for the same chain
+- Fixed by recovering `source_uuid` at export time via `get_version_history(vgid)` → find the current `is_latest=1` row → use that uuid as the archive target. If recovery fails the export degrades cleanly to new-asset mode (which then hits the name-collision check) rather than silently writing dual-latest
+
+**Blender — Queue import stamps UAL metadata on materials**
+- Root cause of "I can only version a material in the same Blender session I exported it in": the queue/drag-import path (`queue_handler._handle_material_import`) brought the material datablock into the scene but never called `store_material_metadata` on it. So a material dragged in via the app in a fresh `.blend` file had zero library lineage and the export operator saw it as a brand-new asset
+- `import_helpers.import_material_from_blend` / `import_material_from_usd` now accept an optional `asset_metadata` dict and stamp the imported material via `store_material_metadata` when provided. Queue handler forwards the request fields
+
+### Fixed
+
+**Schema migration version row now auto-bumps**
+- `SchemaManager.initialize()` previously only wrote the `schema_version` row when the DB was brand-new (`current_version == 0`). For existing DBs the migration code DID run on every launch (idempotent `ALTER TABLE ADD COLUMN`s), but the version row stayed stuck at whatever it was last set to — sometimes years out of date. Users couldn't tell whether migrations had actually applied without manually inspecting `PRAGMA table_info`
+- Now the version row is rewritten to `SCHEMA_VERSION` after every successful migration, with an `INFO` log line: `Schema upgraded: v17 -> v21`
+
+### Documented (Known Limitations)
+- Pre-v20 materials: structural-diff fields (`material_node_count`, etc.) read as `N/A` in the diff panel until the material is re-exported with the new addon. No automatic backfill — the data isn't recoverable from the saved `.blend` without re-opening it
+- Pre-v21 rigs: `polygon_count`, `material_count`, `bound_mesh_count`, `animation_count` read as `N/A` until the rig is re-exported. Same reason — the old `collect_rig_metadata` only captured the armature's bone counts, so there's no data to backfill from
+- `material_unique_node_types` diff renders raw `bl_idname`s (e.g. `ShaderNodeBsdfPrincipled`). Pretty-printing + truncation on the long-form list is deferred — bounded in practice because Blender has ~150 shader node types total and most version bumps add 2–5
+
+---
+
 ## [1.2.2] - 2026-05-13
 
 Post-`1.2.1` work focused entirely on making **custom proxies** actually usable end-to-end: a Blender authoring path that doesn't require power-user name-juggling, a `.glb` per proxy so the app can preview them in 3D, stable proxy numbering across deletions, and a Representations dialog that auto-refreshes, supports per-proxy delete, and shows a live 3D preview of the selected proxy.

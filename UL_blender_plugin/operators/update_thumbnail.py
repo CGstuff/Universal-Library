@@ -9,12 +9,15 @@ Also includes the thumbnail helper toggle operator for interactive framing.
 
 import bpy
 from bpy.types import Operator
-from bpy.props import BoolProperty
+from bpy.props import BoolProperty, EnumProperty
 from pathlib import Path
 from mathutils import Matrix, Vector, Quaternion
 
 from ..utils.library_connection import get_library_connection
-from ..utils.metadata_handler import has_ual_metadata, read_ual_metadata
+from ..utils.metadata_handler import (
+    has_ual_metadata, read_ual_metadata,
+    has_material_metadata, read_material_metadata,
+)
 from ..utils.viewport_capture import capture_viewport_thumbnail, get_objects_bbox_3d
 
 
@@ -317,9 +320,234 @@ class UAL_OT_toggle_thumbnail_helper(Operator):
         obj.ual_thumbnail_helper_matrix = flat_matrix
 
 
+class UAL_OT_update_material_thumbnail(Operator):
+    """Capture the current 3D viewport as the new thumbnail for a library material.
+
+    Unlike the export-time material thumbnail (always renders a sphere
+    in a bundled preview scene), this operator snapshots whatever the
+    user has on screen right now. That lets the artist flip their
+    viewport into Rendered shading, turn on transparent film, frame
+    their own object with the material applied, and capture *that*
+    without re-running a full export.
+    """
+
+    bl_idname = "ual.update_material_thumbnail"
+    bl_label = "Update Material Thumbnail"
+    bl_description = (
+        "Re-capture the thumbnail for a library material using the current viewport "
+        "state (set viewport to Rendered + transparent film first for a clean look)"
+    )
+    bl_options = {'REGISTER', 'UNDO'}
+
+    material_name: EnumProperty(
+        name="Material",
+        description="Material to update thumbnail for (only library-imported materials shown)",
+        items=lambda self, context: UAL_OT_update_material_thumbnail._get_material_items(context),
+    )
+
+    @staticmethod
+    def _get_material_items(context):
+        items = []
+        seen = set()
+
+        if context.active_object and hasattr(context.active_object, 'material_slots'):
+            for slot in context.active_object.material_slots:
+                mat = slot.material
+                if mat and mat.name not in seen and has_material_metadata(mat):
+                    items.append((mat.name, mat.name, f"From {context.active_object.name}"))
+                    seen.add(mat.name)
+
+        for mat in bpy.data.materials:
+            if mat.name not in seen and has_material_metadata(mat):
+                items.append((mat.name, mat.name, "Library material in scene"))
+                seen.add(mat.name)
+
+        if not items:
+            items.append(('NONE', "No library materials", "Import a material from the library first"))
+        return items
+
+    @classmethod
+    def poll(cls, context):
+        return any(has_material_metadata(m) for m in bpy.data.materials)
+
+    def invoke(self, context, event):
+        if context.active_object and hasattr(context.active_object, 'material_slots'):
+            for slot in context.active_object.material_slots:
+                if slot.material and has_material_metadata(slot.material):
+                    self.material_name = slot.material.name
+                    break
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "material_name")
+
+        if self.material_name and self.material_name != 'NONE':
+            mat = bpy.data.materials.get(self.material_name)
+            if mat:
+                metadata = read_material_metadata(mat)
+                if metadata:
+                    box = layout.box()
+                    box.label(
+                        text=f"Source: {metadata.get('asset_name', '?')} "
+                             f"({metadata.get('version_label', '?')})",
+                        icon='MATERIAL',
+                    )
+                    box.label(text="Captures your current 3D viewport.", icon='INFO')
+                    box.label(text="Tip: Rendered + transparent film for best results.")
+
+    def execute(self, context):
+        if not self.material_name or self.material_name == 'NONE':
+            self.report({'ERROR'}, "No material selected")
+            return {'CANCELLED'}
+
+        material = bpy.data.materials.get(self.material_name)
+        if not material:
+            self.report({'ERROR'}, f"Material '{self.material_name}' not found")
+            return {'CANCELLED'}
+
+        metadata = read_material_metadata(material)
+        if not metadata:
+            self.report({'ERROR'}, "Material has no UAL metadata")
+            return {'CANCELLED'}
+
+        asset_uuid = metadata.get('uuid')
+        if not asset_uuid:
+            self.report({'ERROR'}, "Material metadata missing UUID")
+            return {'CANCELLED'}
+
+        library = get_library_connection()
+        if not library:
+            self.report({'ERROR'}, "Could not connect to library")
+            return {'CANCELLED'}
+
+        asset = library.get_asset_by_uuid(asset_uuid)
+        if not asset:
+            self.report({'ERROR'}, f"Asset not found in library (UUID: {asset_uuid[:8]}...)")
+            return {'CANCELLED'}
+
+        # Re-target to the LATEST version of the chain. The material's
+        # stamped UUID points to whichever version was imported — which
+        # could be an older archived version. Artists almost always want
+        # "update the current library entry" rather than "update v001's
+        # archived thumbnail".
+        redirected_from = None
+        if asset.get('is_latest', 1) != 1:
+            vgid = asset.get('version_group_id')
+            if vgid:
+                history = library.get_version_history(vgid)
+                latest_summary = next(
+                    (v for v in history if v.get('is_latest')),
+                    None,
+                )
+                if latest_summary and latest_summary.get('uuid') != asset_uuid:
+                    full_latest = library.get_asset_by_uuid(latest_summary['uuid'])
+                    if full_latest:
+                        redirected_from = asset.get('version_label', '?')
+                        asset = full_latest
+                        asset_uuid = latest_summary['uuid']
+
+        asset_name = asset.get('name', metadata.get('asset_name', 'Unknown'))
+        asset_id = asset.get('asset_id', metadata.get('asset_id', asset_uuid))
+        variant_name = asset.get('variant_name', metadata.get('variant_name', 'Base'))
+        version_label = asset.get('version_label', metadata.get('version_label', 'v001'))
+        is_latest = asset.get('is_latest', 1)
+
+        if is_latest:
+            folder = library.get_library_folder_path(asset_id, asset_name, variant_name, 'material')
+        else:
+            folder = library.get_archive_folder_path(
+                asset_id, asset_name, variant_name, version_label, 'material',
+            )
+
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.report({'ERROR'}, f"Could not create thumbnail folder: {e}")
+            return {'CANCELLED'}
+
+        thumbnail_versioned = folder / f"thumbnail.{version_label}.png"
+
+        view3d_area = None
+        view3d_region = None
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                view3d_area = area
+                for region in area.regions:
+                    if region.type == 'WINDOW':
+                        view3d_region = region
+                        break
+                break
+
+        if not view3d_area or not view3d_region:
+            self.report({'ERROR'}, "No 3D viewport found to capture")
+            return {'CANCELLED'}
+
+        render = context.scene.render
+        saved = {
+            'filepath': render.filepath,
+            'file_format': render.image_settings.file_format,
+            'color_mode': render.image_settings.color_mode,
+            'resolution_x': render.resolution_x,
+            'resolution_y': render.resolution_y,
+            'resolution_percentage': render.resolution_percentage,
+        }
+
+        success = False
+        try:
+            render.filepath = str(thumbnail_versioned)
+            render.image_settings.file_format = 'PNG'
+            render.image_settings.color_mode = 'RGBA'
+            render.resolution_x = 512
+            render.resolution_y = 512
+            render.resolution_percentage = 100
+            # Intentionally NOT touching render.film_transparent — honor
+            # whatever the user set up.
+
+            with context.temp_override(area=view3d_area, region=view3d_region):
+                bpy.ops.render.opengl(write_still=True)
+
+            success = thumbnail_versioned.exists()
+        finally:
+            render.filepath = saved['filepath']
+            render.image_settings.file_format = saved['file_format']
+            render.image_settings.color_mode = saved['color_mode']
+            render.resolution_x = saved['resolution_x']
+            render.resolution_y = saved['resolution_y']
+            render.resolution_percentage = saved['resolution_percentage']
+
+        if not success:
+            self.report({'ERROR'}, "Failed to render viewport thumbnail")
+            return {'CANCELLED'}
+
+        import shutil
+        if is_latest:
+            thumbnail_current = folder / "thumbnail.current.png"
+            shutil.copy2(str(thumbnail_versioned), str(thumbnail_current))
+            db_path = thumbnail_current
+        else:
+            db_path = thumbnail_versioned
+
+        current_db_path = asset.get('thumbnail_path', '')
+        if current_db_path != str(db_path):
+            library.update_asset(asset_uuid, {'thumbnail_path': str(db_path)})
+
+        version_info = f"{version_label}" + (" (latest)" if is_latest else " (archived)")
+        if redirected_from and redirected_from != version_label:
+            self.report(
+                {'INFO'},
+                f"Updated thumbnail for material '{asset_name}' {version_info} "
+                f"(in-scene material was {redirected_from})"
+            )
+        else:
+            self.report({'INFO'}, f"Updated thumbnail for material '{asset_name}' {version_info}")
+        return {'FINISHED'}
+
+
 # Registration
 classes = (
     UAL_OT_update_thumbnail,
+    UAL_OT_update_material_thumbnail,
     UAL_OT_toggle_thumbnail_helper,
 )
 

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from ....services.version_diff import compute_version_diff, DiffResult, FieldDiff
+from ....services.version_diff import compute_version_diff, DiffResult, FieldDiff, ColorDiff
 
 
 # Colors for diff rendering. Kept inline (small, theme-neutral palette).
@@ -194,6 +194,12 @@ class DiffPanel(QWidget):
 
     def _render_field(self, fd: FieldDiff) -> QWidget:
         """Render one FieldDiff as a small multi-line block."""
+        # Color fields get a dedicated swatch-based renderer — reading
+        # `#FF8800 → #00AAFF` as text is way harder than seeing the
+        # actual colors next to each other.
+        if isinstance(fd.shape, ColorDiff):
+            return self._render_color_field(fd)
+
         block = QWidget()
         block_layout = QVBoxLayout(block)
         block_layout.setContentsMargins(0, 0, 0, 0)
@@ -230,6 +236,90 @@ class DiffPanel(QWidget):
             block_layout.addWidget(line_widget)
 
         return block
+
+    def _render_color_field(self, fd: FieldDiff) -> QWidget:
+        """Render a ColorDiff as label + [swatch hex → swatch hex] row.
+
+        Each swatch is a small filled rectangle. The hex strings stay
+        visible alongside so artists can copy/cross-reference exact
+        values, but the dominant signal is the visible color change.
+        """
+        block = QWidget()
+        block_layout = QVBoxLayout(block)
+        block_layout.setContentsMargins(0, 0, 0, 0)
+        block_layout.setSpacing(2)
+
+        label_widget = QLabel(fd.label)
+        label_widget.setStyleSheet(
+            f"color: {_COLOR_LABEL}; font-size: 11px; font-weight: bold;"
+        )
+        block_layout.addWidget(label_widget)
+
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+
+        accent = self._color_for(fd.change_type)
+        prev_hex = (fd.prev_value or '').strip()
+        curr_hex = (fd.curr_value or '').strip()
+
+        # Previous side
+        row.addWidget(self._color_swatch(prev_hex))
+        prev_label = QLabel(prev_hex or '—')
+        prev_label.setStyleSheet(f"color: {_COLOR_DIM}; font-size: 11px;")
+        row.addWidget(prev_label)
+
+        # Arrow
+        arrow = QLabel('→')
+        arrow.setStyleSheet(f"color: {_COLOR_DIM}; font-size: 11px;")
+        row.addWidget(arrow)
+
+        # Current side (accent-colored hex to match other diff types'
+        # "the new value" emphasis)
+        row.addWidget(self._color_swatch(curr_hex))
+        curr_label = QLabel(curr_hex or '—')
+        curr_label.setStyleSheet(f"color: {accent}; font-size: 11px;")
+        row.addWidget(curr_label)
+
+        shift = fd.extra.get('temp_shift', '') if fd.extra else ''
+        if shift:
+            shift_label = QLabel(f"({shift})")
+            shift_label.setStyleSheet(
+                f"color: {_COLOR_DIM}; font-size: 10px; font-style: italic;"
+            )
+            row.addWidget(shift_label)
+
+        row.addStretch()
+        block_layout.addWidget(row_widget)
+
+        return block
+
+    @staticmethod
+    def _color_swatch(hex_color: str) -> QWidget:
+        """Build a small filled rectangle for a hex color.
+
+        Empty/invalid input renders a neutral placeholder swatch so the
+        layout doesn't shift between "color present" and "color absent"
+        rows.
+        """
+        swatch = QFrame()
+        swatch.setFixedSize(16, 16)
+        # Sanity-check the hex — anything weird falls back to a neutral
+        # gray placeholder rather than risking a stylesheet parse error.
+        clean = hex_color.strip().upper() if hex_color else ''
+        if clean.startswith('#') and len(clean) in (4, 7):  # #RGB or #RRGGBB
+            fill = clean
+        else:
+            fill = '#2a2a2a'
+        swatch.setStyleSheet(
+            f"QFrame {{ "
+            f"background-color: {fill}; "
+            f"border: 1px solid #555; "
+            f"border-radius: 2px; "
+            f"}}"
+        )
+        return swatch
 
     @staticmethod
     def _color_for(change_type: str) -> str:

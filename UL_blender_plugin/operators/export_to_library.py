@@ -1000,6 +1000,11 @@ class UAL_OT_export_to_library(Operator):
                 'bone_count': metadata.get('bone_count'),
                 'has_facial_rig': metadata.get('has_facial_rig', 0),
                 'control_count': metadata.get('control_count'),
+                # Rig-asset fields (v21). animation_count + bound_mesh_count
+                # were added when rigs got first-class poly/material/anim
+                # tracking — see metadata_collector.collect_rig_metadata.
+                'animation_count': metadata.get('animation_count'),
+                'bound_mesh_count': metadata.get('bound_mesh_count'),
                 'frame_start': metadata.get('frame_start'),
                 'frame_end': metadata.get('frame_end'),
                 'frame_rate': metadata.get('frame_rate'),
@@ -2048,8 +2053,15 @@ class UAL_OT_export_to_library(Operator):
         """Collect metadata from selected objects using the metadata collector"""
         objects = list(context.selected_objects if self.export_selected_only else context.scene.objects)
 
+        # For rig exports, pass the picked action names so the collector
+        # can populate animation_count. The action picker dialog tracks
+        # which actions the user wants shipped with this rig.
+        action_names = None
+        if self.asset_type == 'rig':
+            action_names = self._selected_action_names()
+
         # Use the centralized metadata collector for extended metadata
-        metadata = collect_all_metadata(objects, self.asset_type)
+        metadata = collect_all_metadata(objects, self.asset_type, action_names=action_names)
 
         # Add object count (not part of type-specific collection)
         metadata['object_count'] = len(objects)
@@ -2096,6 +2108,12 @@ class UAL_OT_export_material(Operator):
     has_ual_metadata: BoolProperty(default=False)
     source_asset_id: StringProperty(default="")
     source_variant_name: StringProperty(default="Base")
+    # Tracks which material was last passed through _check_material_metadata
+    # so the draw loop can refresh metadata fields without clobbering the
+    # user's manual export_mode flip. Plain identifier on purpose:
+    # Blender's property system skips registration for names with a
+    # leading underscore.
+    last_checked_material: StringProperty(default="")
 
     # USD export temporarily disabled - Blender-centric workflow
     # export_usd: BoolProperty(
@@ -2148,8 +2166,22 @@ class UAL_OT_export_material(Operator):
         return context.window_manager.invoke_props_dialog(self, width=400)
 
     def _check_material_metadata(self, material):
-        """Check if material has UAL metadata from library import."""
+        """Check if material has UAL metadata from library import.
+
+        Important: only auto-sets ``export_mode`` when the material
+        SELECTION changes. Blender re-runs ``draw()`` on every redraw
+        (mouse move, focus change, etc.), and ``draw()`` calls this
+        method. If we unconditionally wrote export_mode here, the user's
+        manual flip to NEW_ASSET (e.g. to fork a duplicated material as
+        a separate asset) would be silently reverted to NEW_VERSION on
+        the next redraw.
+
+        So: always refresh the read-only display fields, but only seed
+        export_mode the first time we see a given material.
+        """
         from ..utils.metadata_handler import read_material_metadata
+
+        material_changed = (material.name != self.last_checked_material)
 
         metadata = read_material_metadata(material)
         if metadata:
@@ -2160,7 +2192,8 @@ class UAL_OT_export_material(Operator):
             self.source_asset_name = metadata.get('asset_name', '')
             self.source_asset_id = metadata.get('asset_id', '')
             self.source_variant_name = metadata.get('variant_name', 'Base')
-            self.export_mode = 'NEW_VERSION'
+            if material_changed:
+                self.export_mode = 'NEW_VERSION'
         else:
             self.has_ual_metadata = False
             self.source_uuid = ""
@@ -2169,7 +2202,10 @@ class UAL_OT_export_material(Operator):
             self.source_asset_name = ""
             self.source_asset_id = ""
             self.source_variant_name = "Base"
-            self.export_mode = 'NEW_ASSET'
+            if material_changed:
+                self.export_mode = 'NEW_ASSET'
+
+        self.last_checked_material = material.name
 
     def draw(self, context):
         """Draw dialog UI"""
@@ -2257,7 +2293,9 @@ class UAL_OT_export_material(Operator):
         # Get library connection
         library = get_library_connection()
 
-        # Determine if this is a new version or new asset
+        # Determine if this is a new version or new asset. Need a vgid
+        # to know which chain to extend; source_uuid is recovered below
+        # if missing.
         is_new_version = (
             self.export_mode == 'NEW_VERSION' and
             self.has_ual_metadata and
@@ -2265,6 +2303,31 @@ class UAL_OT_export_material(Operator):
         )
         # Material variants not yet supported
         is_new_variant = False
+
+        # Recover source_uuid if the material was partially stamped (e.g.
+        # imported by an older addon version that set vgid but not uuid,
+        # or stamped before the queue handler started passing metadata).
+        # Without this recovery, the previous-version archival step would
+        # silently skip — leaving two is_latest=1 rows and making the app
+        # show apparent duplicates. We look up the chain's current
+        # is_latest=1 row by vgid and use its uuid as our archive target.
+        if is_new_version and not self.source_uuid:
+            try:
+                history = library.get_version_history(self.source_version_group_id)
+                latest = next((v for v in history if v.get('is_latest')), None)
+                if latest and latest.get('uuid'):
+                    self.source_uuid = latest['uuid']
+                    if not self.source_version:
+                        self.source_version = latest.get('version', 0) or 0
+                    if not self.source_asset_name:
+                        self.source_asset_name = latest.get('name', '') or ''
+                else:
+                    # Chain not found in DB — degrade so the collision
+                    # check below surfaces the issue instead of silently
+                    # creating dual-latest rows.
+                    is_new_version = False
+            except Exception:
+                is_new_version = False
 
         # Generate UUID for this version (always new)
         asset_uuid = str(uuid.uuid4())
@@ -2284,6 +2347,22 @@ class UAL_OT_export_material(Operator):
             version_label = "v001"
             asset_id = asset_uuid
             variant_name = "Base"
+
+        # Collision check — matches the rule every other asset-type export
+        # already enforces (see export_to_library.py for mesh/rig,
+        # export_scene.py, export_collection.py). Without this the
+        # material exporter would happily create a second DB row with the
+        # same name; later name-based lookups in the app would return
+        # whichever row matched first and the user would see "edit one,
+        # update the other".
+        if not is_new_version:
+            if library.asset_name_exists(asset_name, asset_type='material'):
+                self.report(
+                    {'ERROR'},
+                    f"A material asset named '{asset_name}' already exists! "
+                    "Please choose a different name, or use 'New Version' to add a version."
+                )
+                return {'CANCELLED'}
 
         # Get folder using library structure
         library_folder = library.get_library_folder_path(asset_id, asset_name, variant_name, 'material')
@@ -2377,6 +2456,13 @@ class UAL_OT_export_material(Operator):
             if texture_maps and isinstance(texture_maps, list):
                 texture_maps = json.dumps(texture_maps)
 
+            # Same for the structural-fingerprint set field.
+            unique_node_types = mat_metadata.get('material_unique_node_types')
+            if unique_node_types and isinstance(unique_node_types, list):
+                unique_node_types_json = json.dumps(unique_node_types)
+            else:
+                unique_node_types_json = None
+
             # If new version, update previous version in database first
             if is_new_version and self.source_uuid:
                 previous_version_label = f"v{self.source_version:03d}"
@@ -2432,6 +2518,15 @@ class UAL_OT_export_material(Operator):
                 # Material-specific metadata
                 'texture_maps': texture_maps,
                 'texture_resolution': mat_metadata.get('texture_resolution'),
+                # Structural fingerprint (shader-agnostic, works for any
+                # material — Principled, Mix Shader, custom procedural).
+                # Drives the material version-diff panel in the app.
+                'material_node_count': mat_metadata.get('material_node_count'),
+                'material_node_group_count': mat_metadata.get('material_node_group_count'),
+                'material_texture_count': mat_metadata.get('material_texture_count'),
+                'material_unique_node_types': unique_node_types_json,
+                'material_blend_method': mat_metadata.get('material_blend_method'),
+                'material_backface_cull': mat_metadata.get('material_backface_cull'),
             }
 
             library.add_asset(asset_data)

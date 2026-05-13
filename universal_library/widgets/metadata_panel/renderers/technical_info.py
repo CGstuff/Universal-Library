@@ -17,9 +17,13 @@ class TechnicalInfoRenderer:
     Renders technical info based on asset category.
 
     Categories:
-    - mesh: polygon count, materials, skeleton, animations
+    - mesh: polygon count, materials, vertex groups, shape keys
+      (skeleton + animations dropped — a pure mesh has neither; if it
+       does, it should have been exported as a rig)
     - material: material count, texture maps, resolution
-    - rig: bone count, facial rig, controls
+    - rig: bone count, controls, animations (count), bound meshes,
+      polygons, materials, shape keys (a rig drives meshes so the mesh
+      stats are part of the rig's at-a-glance weight)
     - animation: frame range, fps, duration, loop
     - light: light type, count
     - camera: camera type, focal length
@@ -76,7 +80,13 @@ class TechnicalInfoRenderer:
             render_method(asset)
 
     def _render_mesh(self, asset: Dict[str, Any]):
-        """Render mesh category info."""
+        """Render mesh category info.
+
+        Skeleton / animations / facial-rig fields are intentionally NOT
+        shown here — those are rig concerns. A pure mesh asset has no
+        skeleton; if you exported one with a skeleton, it should have
+        been classified as a rig.
+        """
         polygon_count = asset.get('polygon_count', 0)
         if 'polygons' in self._labels:
             self._labels['polygons'].setText(f"Polygons: {format_number(polygon_count)}")
@@ -89,6 +99,14 @@ class TechnicalInfoRenderer:
             )
             self._labels['materials'].show()
 
+        # Object count — useful at a glance to distinguish "single hero
+        # prop" from "47-piece kitbash". Only surfaced when >1 because
+        # "Objects: 1" adds noise without adding signal.
+        object_count = asset.get('object_count')
+        if object_count and object_count > 1 and 'object_count' in self._labels:
+            self._labels['object_count'].setText(f"Objects: {format_number(object_count)}")
+            self._labels['object_count'].show()
+
         vertex_group_count = asset.get('vertex_group_count', 0)
         if vertex_group_count and vertex_group_count > 0 and 'vertex_groups' in self._labels:
             self._labels['vertex_groups'].setText(f"Vertex Groups: {vertex_group_count}")
@@ -98,26 +116,6 @@ class TechnicalInfoRenderer:
         if shape_key_count and shape_key_count > 0 and 'shape_keys' in self._labels:
             self._labels['shape_keys'].setText(f"Shape Keys: {shape_key_count}")
             self._labels['shape_keys'].show()
-
-        bone_count = asset.get('bone_count', 0)
-        if bone_count and bone_count > 0 and 'bone_count' in self._labels:
-            self._labels['bone_count'].setText(f"Bones: {format_number(bone_count)}")
-            self._labels['bone_count'].show()
-
-        has_skeleton = asset.get('has_skeleton', 0)
-        if 'skeleton' in self._labels:
-            self._labels['skeleton'].setText(f"Skeleton: {'Yes' if has_skeleton else 'No'}")
-            self._labels['skeleton'].show()
-
-        has_animations = asset.get('has_animations', 0)
-        if 'animations' in self._labels:
-            self._labels['animations'].setText(f"Animations: {'Yes' if has_animations else 'No'}")
-            self._labels['animations'].show()
-
-        if has_skeleton and 'facial_rig' in self._labels:
-            has_facial = asset.get('has_facial_rig', 0)
-            self._labels['facial_rig'].setText(f"Facial Rig: {'Yes' if has_facial else 'No'}")
-            self._labels['facial_rig'].show()
 
     def _render_material(self, asset: Dict[str, Any]):
         """Render material category info."""
@@ -146,21 +144,43 @@ class TechnicalInfoRenderer:
             self._labels['texture_res'].show()
 
     def _render_rig(self, asset: Dict[str, Any]):
-        """Render rig category info."""
-        bone_count = asset.get('bone_count', 0)
-        if 'bone_count' in self._labels:
-            self._labels['bone_count'].setText(f"Bones: {format_number(bone_count)}")
-            self._labels['bone_count'].show()
+        """Render rig category info.
 
-        has_facial = asset.get('has_facial_rig', 0)
-        if 'facial_rig' in self._labels:
-            self._labels['facial_rig'].setText(f"Facial Rig: {'Yes' if has_facial else 'No'}")
-            self._labels['facial_rig'].show()
+        A rig asset = armature + bound meshes + optional animations, so
+        the panel surfaces the full picture: bones/controls describe the
+        skeleton, polygons/materials/shape-keys/bound-mesh describe the
+        skin it drives, animation-count describes what motion ships with
+        it. Facial-rig is intentionally dropped — its detection was a
+        name-heuristic that was wrong as often as it was right.
 
-        control_count = asset.get('control_count', 0)
-        if control_count and control_count > 0 and 'control_count' in self._labels:
-            self._labels['control_count'].setText(f"Controls: {format_number(control_count)}")
-            self._labels['control_count'].show()
+        All fields render unconditionally with "N/A" fallback so the rig
+        structure is visible even for assets exported before the new
+        collector started capturing poly/material/bound_mesh data. Once
+        the user re-exports the rig those rows fill with real numbers.
+        """
+
+        def _show(key: str, label: str, value, *, formatter=None):
+            """Render `label: value` if the label exists; N/A if value is
+            falsy (None or 0). Used to keep the rig section visually
+            consistent across freshly-exported and legacy rigs."""
+            if key not in self._labels:
+                return
+            if value is None or value == 0:
+                self._labels[key].setText(f"{label}: N/A")
+            else:
+                if formatter is not None:
+                    self._labels[key].setText(f"{label}: {formatter(value)}")
+                else:
+                    self._labels[key].setText(f"{label}: {value}")
+            self._labels[key].show()
+
+        _show('bone_count', 'Bones', asset.get('bone_count', 0), formatter=format_number)
+        _show('control_count', 'Controls', asset.get('control_count', 0), formatter=format_number)
+        _show('animations', 'Animations', asset.get('animation_count'))
+        _show('polygons', 'Polygons', asset.get('polygon_count', 0), formatter=format_number)
+        _show('materials', 'Materials', asset.get('material_count', 0))
+        _show('bound_meshes', 'Bound Meshes', asset.get('bound_mesh_count'))
+        _show('shape_keys', 'Shape Keys', asset.get('shape_key_count'))
 
     def _render_animation(self, asset: Dict[str, Any]):
         """Render animation category info."""

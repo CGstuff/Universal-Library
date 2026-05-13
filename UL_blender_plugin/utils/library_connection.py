@@ -195,6 +195,20 @@ class LibraryConnection:
                 is_loop INTEGER DEFAULT 0,
                 texture_maps TEXT,
                 texture_resolution TEXT,
+                -- Material structural-diff fields (schema v20 in app). Kept
+                -- shader-agnostic so the same fingerprint can later cover
+                -- Geometry Nodes.
+                material_node_count INTEGER,
+                material_node_group_count INTEGER,
+                material_texture_count INTEGER,
+                material_unique_node_types TEXT,
+                material_blend_method TEXT,
+                material_backface_cull INTEGER,
+                -- Rig realignment (schema v21). animation_count = number
+                -- of shipped actions; bound_mesh_count = meshes skinned to
+                -- the rig's armature.
+                animation_count INTEGER,
+                bound_mesh_count INTEGER,
                 light_type TEXT,
                 light_count INTEGER,
                 camera_type TEXT,
@@ -202,6 +216,27 @@ class LibraryConnection:
                 FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE CASCADE
             )
         """)
+
+        # Idempotent ALTER TABLE ADD COLUMN for upgrades from older addon
+        # versions where the assets table was created without the v20+
+        # columns. Each runs in its own try/except so a single
+        # already-present column doesn't abort the rest.
+        for col_sql in (
+            # v20: material structural-diff fields
+            'ALTER TABLE assets ADD COLUMN material_node_count INTEGER',
+            'ALTER TABLE assets ADD COLUMN material_node_group_count INTEGER',
+            'ALTER TABLE assets ADD COLUMN material_texture_count INTEGER',
+            'ALTER TABLE assets ADD COLUMN material_unique_node_types TEXT',
+            'ALTER TABLE assets ADD COLUMN material_blend_method TEXT',
+            'ALTER TABLE assets ADD COLUMN material_backface_cull INTEGER',
+            # v21: rig metadata realignment
+            'ALTER TABLE assets ADD COLUMN animation_count INTEGER',
+            'ALTER TABLE assets ADD COLUMN bound_mesh_count INTEGER',
+        ):
+            try:
+                cursor.execute(col_sql)
+            except Exception:
+                pass  # Column already exists
 
         # Create indexes (matching desktop app)
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_assets_uuid ON assets(uuid)')

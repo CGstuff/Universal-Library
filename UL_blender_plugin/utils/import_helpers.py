@@ -331,7 +331,8 @@ def import_usd_file(
 def import_material_from_blend(
     context,
     filepath: str,
-    apply_to_selection: bool = True
+    apply_to_selection: bool = True,
+    asset_metadata: Optional[dict] = None,
 ) -> Tuple[bool, Optional[bpy.types.Material]]:
     """
     Import material from a .blend file.
@@ -340,6 +341,14 @@ def import_material_from_blend(
         context: Blender context
         filepath: Path to .blend file containing material
         apply_to_selection: If True, apply to selected meshes
+        asset_metadata: Optional dict of UAL asset fields (uuid,
+            version_group_id, version, version_label, name, asset_id,
+            variant_name, ...). When provided, the imported material is
+            stamped via store_material_metadata so the export operator
+            can later offer "new version" on it. Without this, materials
+            dragged in via the queue handler would land in fresh Blender
+            files with no library lineage and the user would be unable
+            to version them.
 
     Returns:
         Tuple of (success, imported material or None)
@@ -361,10 +370,24 @@ def import_material_from_blend(
 
         if apply_to_selection and selected_meshes:
             for obj in selected_meshes:
-                if obj.data.materials:
-                    obj.data.materials[0] = imported_material
-                else:
-                    obj.data.materials.append(imported_material)
+                # Always append. On a mesh with zero materials this still
+                # creates slot 0; on a mesh that already has materials it
+                # appends a new slot at the end instead of overwriting the
+                # one the artist already set up. Imports are additive,
+                # never destructive.
+                obj.data.materials.append(imported_material)
+
+        # Stamp UAL metadata so future exports can recognize this material
+        # as a library asset and offer the "new version" path.
+        if asset_metadata:
+            try:
+                from .metadata_handler import store_material_metadata
+                store_material_metadata(imported_material, asset_metadata)
+            except Exception:
+                logger.exception(
+                    "Failed to stamp UAL metadata on imported material %s",
+                    imported_material.name,
+                )
 
         return True, imported_material
 
@@ -376,7 +399,8 @@ def import_material_from_blend(
 def import_material_from_usd(
     context,
     filepath: str,
-    apply_to_selection: bool = True
+    apply_to_selection: bool = True,
+    asset_metadata: Optional[dict] = None,
 ) -> Tuple[bool, Optional[bpy.types.Material]]:
     """
     Import material from a USD file (extracts from geometry).
@@ -385,6 +409,7 @@ def import_material_from_usd(
         context: Blender context
         filepath: Path to USD file
         apply_to_selection: If True, apply to originally selected meshes
+        asset_metadata: See import_material_from_blend.
 
     Returns:
         Tuple of (success, imported material or None)
@@ -419,10 +444,18 @@ def import_material_from_usd(
             for obj in original_meshes:
                 if obj.name in bpy.data.objects:
                     obj.select_set(True)
-                    if obj.data.materials:
-                        obj.data.materials[0] = imported_material
-                    else:
-                        obj.data.materials.append(imported_material)
+                    # Always append (see note in import_material_from_blend).
+                    obj.data.materials.append(imported_material)
+
+        if asset_metadata:
+            try:
+                from .metadata_handler import store_material_metadata
+                store_material_metadata(imported_material, asset_metadata)
+            except Exception:
+                logger.exception(
+                    "Failed to stamp UAL metadata on imported material %s",
+                    imported_material.name,
+                )
 
         return True, imported_material
 

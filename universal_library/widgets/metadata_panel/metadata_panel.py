@@ -198,11 +198,17 @@ class MetadataPanel(QWidget):
         self._tech_labels = {
             'polygons': QLabel("Polygons: -"),
             'materials': QLabel("Materials: -"),
+            'object_count': QLabel("Objects: -"),
             'vertex_groups': QLabel("Vertex Groups: -"),
             'shape_keys': QLabel("Shape Keys: -"),
             'bone_count': QLabel("Bones: -"),
-            'skeleton': QLabel("Skeleton: -"),
             'animations': QLabel("Animations: -"),
+            'bound_meshes': QLabel("Bound Meshes: -"),
+            # Legacy labels kept (and unused now) so old asset DB rows
+            # don't crash any caller that still references them. They're
+            # never .show()n by the renderers anymore — mesh panel skips
+            # them entirely, rig panel surfaces animation_count instead.
+            'skeleton': QLabel("Skeleton: -"),
             'facial_rig': QLabel("Facial Rig: -"),
             'texture_maps': QLabel("Texture Maps: -"),
             'texture_res': QLabel("Resolution: -"),

@@ -149,42 +149,128 @@ def _detect_facial_rig(bones) -> bool:
     return False
 
 
-def collect_rig_metadata(armature: bpy.types.Object) -> Dict[str, Any]:
+def collect_rig_metadata(
+    objects: List[bpy.types.Object],
+    action_names: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     """
-    Collect metadata from armature/rig objects.
+    Collect metadata for a rig asset — armature plus all bound meshes
+    plus any shipped animations. A rig isn't just a skeleton; it's the
+    whole character. So we capture polygon/material counts across the
+    bound meshes too, otherwise the library shows '10 bones, 0 polys'
+    which tells the user nothing about the actual asset they're browsing.
 
     Args:
-        armature: Blender armature object
+        objects: All objects being exported as the rig (armature + bound
+            meshes). For backwards compat a single armature object is
+            also accepted.
+        action_names: Optional set of action names being shipped with the
+            rig (from the action-picker dialog). Used for animation_count.
 
     Returns:
-        Dict with bone_count, has_facial_rig, control_count
+        Dict with bone_count, control_count, polygon_count, material_count,
+        bound_mesh_count, shape_key_count, vertex_group_count,
+        animation_count, has_animations.
     """
-    if not armature or armature.type != 'ARMATURE' or not armature.data:
+    # Backwards compatibility: accept a single armature object too.
+    if isinstance(objects, bpy.types.Object):
+        objects = [objects]
+
+    if not objects:
         return {
             'bone_count': 0,
-            'has_facial_rig': 0,
-            'control_count': 0,
+            'control_count': None,
+            'polygon_count': 0,
+            'material_count': 0,
+            'bound_mesh_count': None,
+            'shape_key_count': None,
+            'vertex_group_count': None,
+            'animation_count': len(action_names) if action_names else 0,
+            'has_animations': 1 if action_names else 0,
         }
 
-    bones = armature.data.bones
-    bone_count = len(bones)
-    has_facial_rig = _detect_facial_rig(bones)
+    armatures = [o for o in objects if o.type == 'ARMATURE' and o.data]
+    meshes_in_selection = [o for o in objects if o.type == 'MESH' and o.data]
 
-    # Count control bones (bones that are likely controls, not deform bones)
+    # Bone + control counts from the (first) armature. Multi-armature
+    # rigs are vanishingly rare; if they happen we use the largest.
+    bone_count = 0
     control_count = 0
-    for bone in bones:
-        # Control bones often have specific naming conventions
-        name_lower = bone.name.lower()
-        if any(ctrl in name_lower for ctrl in ['ctrl', 'control', 'ik', 'fk', 'pole', 'target']):
-            control_count += 1
-        # Or bones that are not deform bones
-        elif not bone.use_deform:
-            control_count += 1
+    for armature in armatures:
+        bones = armature.data.bones
+        if len(bones) > bone_count:
+            bone_count = len(bones)
+            control_count = 0
+            for bone in bones:
+                name_lower = bone.name.lower()
+                if any(ctrl in name_lower for ctrl in
+                       ('ctrl', 'control', 'ik', 'fk', 'pole', 'target')):
+                    control_count += 1
+                elif not bone.use_deform:
+                    control_count += 1
+
+    # Find every mesh in the SCENE that's driven by one of the selected
+    # armatures — Armature-modifier target or direct parenting. The user
+    # may only have selected the armature itself; the bound meshes still
+    # belong to the rig asset (the rig export already auto-includes them
+    # in the saved .blend). Without scene-walking here, polygon/material
+    # counts would only reflect whatever meshes happened to be selected.
+    bound_meshes = []
+    seen = set()
+    if armatures:
+        armature_objs = set(armatures)
+        try:
+            scene_objects = list(bpy.context.scene.objects)
+        except (AttributeError, ReferenceError):
+            scene_objects = []
+        for obj in scene_objects:
+            if obj.type != 'MESH' or not obj.data or obj.name in seen:
+                continue
+            # Bound via Armature modifier targeting one of our armatures?
+            linked = False
+            for mod in obj.modifiers:
+                if mod.type == 'ARMATURE' and mod.object in armature_objs:
+                    linked = True
+                    break
+            # Or parented to an armature?
+            if not linked and obj.parent in armature_objs:
+                linked = True
+            if linked:
+                bound_meshes.append(obj)
+                seen.add(obj.name)
+    # If no armature is present (e.g. someone classified a meshes-only
+    # collection as 'rig' by mistake), fall back to whatever meshes are
+    # in the selection so the counts still reflect the actual asset.
+    if not bound_meshes:
+        bound_meshes = meshes_in_selection
+
+    # Sum poly / material / shape-key / vertex-group counts across bound
+    # meshes. This is the user-visible "weight" of the rig as an asset.
+    polygon_count = 0
+    materials_seen: Set[str] = set()
+    shape_key_count = 0
+    vertex_group_count = 0
+    for mesh in bound_meshes:
+        polygon_count += len(mesh.data.polygons)
+        if mesh.data.shape_keys and mesh.data.shape_keys.key_blocks:
+            shape_key_count += len(mesh.data.shape_keys.key_blocks)
+        for slot in mesh.material_slots:
+            if slot.material:
+                materials_seen.add(slot.material.name)
+        vertex_group_count += len(mesh.vertex_groups)
+
+    animation_count = len(action_names) if action_names else 0
 
     return {
-        'bone_count': bone_count,
-        'has_facial_rig': 1 if has_facial_rig else 0,
+        'bone_count': bone_count if bone_count > 0 else None,
         'control_count': control_count if control_count > 0 else None,
+        'polygon_count': polygon_count,
+        'material_count': len(materials_seen),
+        'bound_mesh_count': len(bound_meshes) if bound_meshes else None,
+        'shape_key_count': shape_key_count if shape_key_count > 0 else None,
+        'vertex_group_count': vertex_group_count if vertex_group_count > 0 else None,
+        'animation_count': animation_count,
+        'has_animations': 1 if animation_count > 0 else 0,
     }
 
 
@@ -235,23 +321,119 @@ def _detect_animation_loop(scene: bpy.types.Scene) -> bool:
     return False
 
 
+def _node_tree_fingerprint(tree) -> Dict[str, Any]:
+    """Compute structural counts for a node tree, recursing into groups.
+
+    Returns:
+        Dict with:
+          - node_count: total nodes across the tree and all nested groups
+          - node_group_count: number of ShaderNodeGroup / GeometryNodeGroup
+            instances encountered (top-level + nested)
+          - texture_count: number of image texture nodes
+          - unique_node_types: sorted list of distinct ``bl_idname`` values
+
+    Designed to be shader-agnostic so the same helper can be reused later
+    for Geometry Nodes asset diffs — give it any NodeTree and it works.
+    Recurses into node groups so nesting doesn't hide complexity.
+    """
+    counts = {
+        'node_count': 0,
+        'node_group_count': 0,
+        'texture_count': 0,
+        'unique_node_types': set(),
+    }
+
+    def _walk(t, seen_trees):
+        if t is None or id(t) in seen_trees:
+            return
+        seen_trees.add(id(t))
+        for node in t.nodes:
+            counts['node_count'] += 1
+            counts['unique_node_types'].add(node.bl_idname)
+            # Texture nodes (shader image texture + GN image texture both
+            # show up as 'ShaderNodeTexImage' or 'GeometryNodeImageTexture')
+            if node.bl_idname in ('ShaderNodeTexImage', 'GeometryNodeImageTexture'):
+                counts['texture_count'] += 1
+            # Node groups: count + recurse so nested content shows up.
+            if node.bl_idname in (
+                'ShaderNodeGroup', 'GeometryNodeGroup', 'CompositorNodeGroup',
+                'TextureNodeGroup',
+            ):
+                counts['node_group_count'] += 1
+                _walk(getattr(node, 'node_tree', None), seen_trees)
+
+    _walk(tree, set())
+    return {
+        'node_count': counts['node_count'],
+        'node_group_count': counts['node_group_count'],
+        'texture_count': counts['texture_count'],
+        'unique_node_types': sorted(counts['unique_node_types']),
+    }
+
+
 def collect_material_metadata(materials: List[bpy.types.Material]) -> Dict[str, Any]:
     """
     Collect metadata from materials.
+
+    For library-saved materials we keep this aware of the actual use case:
+    a saved material is almost always a complex shader (procedural rock,
+    layered ground, custom skin) where reading a Principled BSDF's
+    default sockets would be meaningless because every input is plugged
+    into a 30-node network. So the diff fields are deliberately
+    **structural** — node counts, node types, texture counts — which work
+    for any shader regardless of complexity.
 
     Args:
         materials: List of Blender materials
 
     Returns:
-        Dict with material_count, texture_maps, texture_resolution
+        Dict with material_count, texture_maps, texture_resolution,
+        plus structural fields:
+          - material_node_count
+          - material_node_group_count
+          - material_texture_count
+          - material_unique_node_types
+          - material_blend_method
+          - material_backface_cull
     """
     texture_maps: Set[str] = set()
     max_resolution = 0
     resolutions: Set[int] = set()
 
+    # Aggregate structural counts across all materials. For the material
+    # export operator there's typically one material, but the function
+    # signature takes a list (it's also called from the multi-object
+    # export path) so we sum across.
+    total_node_count = 0
+    total_node_group_count = 0
+    total_texture_count = 0
+    all_unique_types: Set[str] = set()
+
+    # Material-level flags — captured from the FIRST material that uses
+    # nodes (single-material export is the dominant case; for multi-
+    # material we report the first one's settings rather than averaging,
+    # which would be lossy and lie).
+    blend_method: Optional[str] = None
+    backface_cull: Optional[bool] = None
+
     for mat in materials:
         if not mat or not mat.use_nodes:
             continue
+
+        # Structural fingerprint (reusable for GN later — same helper).
+        fp = _node_tree_fingerprint(mat.node_tree)
+        total_node_count += fp['node_count']
+        total_node_group_count += fp['node_group_count']
+        total_texture_count += fp['texture_count']
+        all_unique_types.update(fp['unique_node_types'])
+
+        # Material-level properties (no shader-type assumption).
+        if blend_method is None:
+            blend_method = getattr(mat, 'blend_method', None) or getattr(
+                mat, 'surface_render_method', None
+            )
+        if backface_cull is None:
+            backface_cull = bool(getattr(mat, 'use_backface_culling', False))
 
         for node in mat.node_tree.nodes:
             if node.type == 'TEX_IMAGE' and node.image:
@@ -281,6 +463,13 @@ def collect_material_metadata(materials: List[bpy.types.Material]) -> Dict[str, 
         'material_count': len(materials),
         'texture_maps': list(texture_maps) if texture_maps else None,
         'texture_resolution': texture_resolution,
+        # Structural fingerprint — shader-agnostic, works for any material.
+        'material_node_count': total_node_count if total_node_count > 0 else None,
+        'material_node_group_count': total_node_group_count if total_node_group_count > 0 else None,
+        'material_texture_count': total_texture_count if total_texture_count > 0 else None,
+        'material_unique_node_types': sorted(all_unique_types) if all_unique_types else None,
+        'material_blend_method': blend_method,
+        'material_backface_cull': 1 if backface_cull else 0 if backface_cull is False else None,
     }
 
 
@@ -729,13 +918,19 @@ def collect_collection_metadata(collection: bpy.types.Collection) -> Dict[str, A
     return metadata
 
 
-def collect_all_metadata(objects: List[bpy.types.Object], asset_type: str) -> Dict[str, Any]:
+def collect_all_metadata(
+    objects: List[bpy.types.Object],
+    asset_type: str,
+    action_names: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
     """
     Collect all relevant metadata based on asset type.
 
     Args:
         objects: List of Blender objects
         asset_type: Type of asset ('model', 'rig', 'animation', 'material', 'light', 'camera')
+        action_names: Optional set of action names being shipped with
+            the asset (used by rig export to populate animation_count).
 
     Returns:
         Dict with all relevant metadata fields
@@ -768,10 +963,11 @@ def collect_all_metadata(objects: List[bpy.types.Object], asset_type: str) -> Di
     if asset_type in mesh_types:
         metadata.update(collect_mesh_metadata(objects))
     elif asset_type == 'rig':
-        if armatures:
-            metadata.update(collect_rig_metadata(armatures[0]))
-        else:
-            metadata.update(collect_rig_metadata(None))
+        # Pass the FULL selection (armature + bound meshes), not just
+        # the armature. A rig asset's poly/material/animation counts
+        # are essential — without this the app shows "10 bones, 0 polys"
+        # for what's actually a 50k-poly hero character.
+        metadata.update(collect_rig_metadata(objects, action_names=action_names))
     elif asset_type == 'animation':
         metadata.update(collect_animation_metadata())
     elif asset_type == 'material':
